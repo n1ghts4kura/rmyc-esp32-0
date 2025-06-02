@@ -42,7 +42,7 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
 #define GATTS_CHAR_UUID_TEST_A      0xFF01 // Characteristic UUID
 #define GATTS_DEMO_CHAR_VAL_LEN_MAX 0x40   // Characteristic 名称最长长度
 #define GATTS_DESCR_UUID_TEST_A     0x3333 // Descriptor UUID
-#define GATTS_NUM_HANDLE_TEST_A     1      // Max connecting device number
+#define GATTS_NUM_HANDLE_TEST_A     4      // BZD是什么。。
 
 // ESP32 蓝牙设备名称
 // 若有多个设备同时使用 记得修改不同esp32设备的名称
