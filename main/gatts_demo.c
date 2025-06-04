@@ -171,17 +171,18 @@ static void hw_uart_init() {
     uart_set_pin(uart_num, GPIO_NUM_4, GPIO_NUM_5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     // uart_set_mode(uart_num, UART_MODE_UART);
 }
-static int hw_uart_write(const uint8_t* string) {
-    return uart_write_bytes(uart_num, string, strlen(string));
+static int hw_uart_write(const char* string) {
+    return uart_write_bytes(uart_num, string, strlen((const char *)string));
 }
-static bool hw_uart_read(uint8_t* string) {
+static bool hw_uart_read(char* string) {
     int length = 0;
-    ESP_ERROR_CHECK(uart_get_buffered_data_len(uart_num, &length));
+    ESP_ERROR_CHECK(uart_get_buffered_data_len(uart_num, (size_t *)length));
     if (length <= 0) {
         return false;
     }
-    string[length] = "\0";
-    return uart_read_bytes(uart_num, string, length, 20 / portTICK_PERIOD_MS);
+    int result = uart_read_bytes(uart_num, string, length, 20 / portTICK_PERIOD_MS);
+    *(string + length) = 0;
+    return result;
 }
 
 // 任务定义
@@ -192,9 +193,9 @@ void task_uart_send() {
             DELAY(500);
             continue;
         }
-        uint8_t send_data[MSG_LEN_MAX] = (uint8_t *)malloc(sizeof(uint8_t) * MSG_LEN_MAX);
+        uint8_t *send_data = (uint8_t *)malloc(sizeof(uint8_t) * MSG_LEN_MAX);
         ble_queue_pop(send_data);
-        hw_uart_write(send_data);
+        hw_uart_write((const char *)send_data);
         ESP_LOGI(GATTS_TAG, "Uart sending: [%s]\n", send_data);
         free(send_data);
     }
@@ -203,11 +204,10 @@ void task_uart_send() {
 void task_uart_recv() {
     while(true) {
         int length = 0;
-        uint8_t recv_data[MSG_LEN_MAX] = (uint8_t *)malloc(sizeof(uint8_t) * MSG_LEN_MAX);
+        uint8_t *recv_data = (uint8_t *)malloc(sizeof(uint8_t) * MSG_LEN_MAX);
         uart_get_buffered_data_len(uart_num, (size_t *)length);
         if (length > 0) {
-            uart_read_bytes(uart_num, recv_data, length, 100);
-            recv_data[length] = "\0";
+            hw_uart_read((char *)recv_data);
             uart_queue_append(recv_data);
             ESP_LOGI(GATTS_TAG, "Uart recving: [%s]\n", recv_data);
             DELAY(500);
@@ -497,26 +497,30 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
         esp_gatt_rsp_t rsp;
         memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
         rsp.attr_value.handle = param->read.handle;
+        rsp.attr_value.len = 0;
        
         // TODO
-        char data[MSG_LEN_MAX] = "";
-        uart_queue_pop((uint8_t *)data);
-        rsp.attr_value.len = strlen(data);
-        memcpy(rsp.attr_value.value, (const uint8_t *)data, rsp.attr_value.len);
+        // char *data = NULL;
+        // uart_queue_pop((uint8_t *)data);
 
-        esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id,
-                                    ESP_GATT_OK, &rsp);
-
-        free(data);
+        // if (data == NULL) {
+        //     rsp.attr_value.len = 0;
+        // } else {
+        //     rsp.attr_value.len = strlen(data);
+        //     memcpy(rsp.attr_value.value, (const uint8_t *)data, rsp.attr_value.len);
+        //     esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id,
+        //                                 ESP_GATT_OK, &rsp);
+        //     free(data);
+        // }
         break;
     }
     case ESP_GATTS_WRITE_EVT: { // client端写入数据 server端获取信息
         ESP_LOGI(GATTS_TAG, "Characteristic write, conn_id %d, trans_id %" PRIu32 ", handle %d", param->write.conn_id, param->write.trans_id, param->write.handle);
 
-        uint8_t data[MSG_LEN_MAX] = "";
-        memcpy(data, param->write.value, param->write.len); 
-        ble_queue_append(data); 
-        free(data);
+        // uint8_t data[MSG_LEN_MAX] = "";
+        // memcpy(data, param->write.value, param->write.len); 
+        // ble_queue_append(data); 
+        // free(data);
 
         if (!param->write.is_prep){
             ESP_LOGI(GATTS_TAG, "value len %d, value ", param->write.len);
@@ -755,6 +759,7 @@ void app_main(void)
     hw_uart_init();
     ble_queue_init();
     uart_queue_init();
+    // hw_uart_write("command;");
 
     xTaskCreate(task_uart_send, "", 1000, NULL, 0, NULL);
     xTaskCreate(task_uart_recv, "", 1000, NULL, 0, NULL);
