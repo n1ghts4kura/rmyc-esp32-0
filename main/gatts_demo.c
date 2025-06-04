@@ -29,12 +29,180 @@
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
 #include "esp_gatt_common_api.h"
+#include "driver/uart.h"
+#include "driver/gpio.h"
 
 #include "sdkconfig.h"
 
 #define GATTS_TAG "GATTS_APP"
 
-///Declare the static function
+#define DELAY(x) \
+    do { \
+        vTaskDelay((x) / portTICK_PERIOD_MS); \
+    } while (0);
+
+// 信息数据队列实现 蓝牙
+#define MSG_LEN_MAX 256  // 256 / 2 = 128个ascii字
+typedef struct ble_queue_node_t {
+    // esp_gatt_value_t value;
+    uint8_t *value;
+    struct ble_queue_node_t *next;
+} ble_queue_node_t ;
+typedef struct ble_queue_t {
+    ble_queue_node_t *front;
+    ble_queue_node_t *rear;
+} ble_queue_t ;
+static ble_queue_t ble_queue;
+static void ble_queue_init() {
+    ble_queue.front = NULL;
+    ble_queue.rear  = NULL;
+}
+static bool ble_queue_is_empty() {
+    return ble_queue.front == NULL;
+}
+static bool ble_queue_append(uint8_t *val) {
+    ble_queue_node_t *new_node = (ble_queue_node_t *)malloc(sizeof(ble_queue_node_t));
+    if (!new_node) {
+        ESP_LOGE(GATTS_TAG, "failed to append to ble_queue! (memory)\n");
+        return false;
+    }
+    new_node->value = NULL;
+    memcpy(new_node->value, (const uint8_t *)val, MSG_LEN_MAX); // Check if memory go die. LOL
+    new_node->next = NULL;
+    if (ble_queue_is_empty()) {
+        ble_queue.front = new_node;
+        ble_queue.rear  = new_node;
+    } else {
+        ble_queue.rear->next = new_node;
+        ble_queue.rear = new_node;
+    }
+    return true;
+}
+static bool ble_queue_pop(uint8_t *val) {
+    if (ble_queue_is_empty()) {
+        ESP_LOGE(GATTS_TAG, "failed to pop ble_queue! (empty queue)\n");
+        return false;
+    }
+    ble_queue_node_t *tmp = ble_queue.front;
+    memcpy(val, (const uint8_t *)tmp->value, MSG_LEN_MAX); // Check if memory go die here. LOL
+    ble_queue.front = ble_queue.front->next;
+    if (ble_queue.front == NULL) {
+        ble_queue.rear = NULL;
+    }
+    free(tmp);
+    return true;
+}
+
+// 信息数据队列实现 UART
+typedef struct uart_queue_node_t {
+    uint8_t *value;
+    struct uart_queue_node_t *next;
+} uart_queue_node_t ;
+typedef struct uart_queue_t {
+    uart_queue_node_t *front;
+    uart_queue_node_t *rear;
+} uart_queue_t ;
+static uart_queue_t uart_queue;
+static void uart_queue_init() {
+    uart_queue.front = NULL;
+    uart_queue.rear  = NULL;
+}
+static bool uart_queue_is_empty() {
+    return uart_queue.front == NULL;
+}
+static bool uart_queue_append(uint8_t *val) {
+    uart_queue_node_t *new_node = (uart_queue_node_t *)malloc(sizeof(uart_queue_node_t));
+    if (!new_node) {
+        ESP_LOGE(GATTS_TAG, "failed to append to uart_queue! (memory)\n");
+        return false;
+    }
+    new_node->value = NULL;
+    memcpy(new_node->value, (const uint8_t *)val, MSG_LEN_MAX); // Check if memory go die LOL.
+    new_node->next = NULL;
+    if (uart_queue_is_empty()) {
+        uart_queue.front = new_node;
+        uart_queue.rear  = new_node;
+    } else {
+        uart_queue.rear->next = new_node;
+        uart_queue.rear = new_node;
+    }
+    return true;
+}
+static bool uart_queue_pop(uint8_t *val) {
+    if (uart_queue_is_empty()) {
+        ESP_LOGE(GATTS_TAG, "failed to pop uart_queue! (empty queue)\n");
+        return false;
+    }
+    uart_queue_node_t *tmp = uart_queue.front;
+    memcpy(val, tmp->value, MSG_LEN_MAX); // Check
+    uart_queue.front = uart_queue.front->next;
+    if (uart_queue.front == NULL) {
+        uart_queue.rear = NULL;
+    }
+    free(tmp);
+    return true;
+}
+
+// UART 配置
+QueueHandle_t hw_uart_queue;
+const uart_port_t uart_num = UART_NUM_2;
+const int uart_buffer_size = (1024 * 2);
+uart_config_t uart_config = {
+    .baud_rate = 115200,
+    .data_bits = UART_DATA_8_BITS,
+    .parity    = UART_PARITY_DISABLE,
+    .stop_bits = UART_STOP_BITS_1,
+    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    // .rx_flow_ctrl_thresh
+};
+static void hw_uart_init() {
+    uart_set_pin(uart_num, GPIO_NUM_4, GPIO_NUM_5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
+    ESP_ERROR_CHECK(
+        uart_driver_install(
+            uart_num,
+            uart_buffer_size,
+            uart_buffer_size,
+            10,
+            &hw_uart_queue,
+            0
+        )
+    );
+    uart_set_mode(uart_num, UART_MODE_UART);
+}
+
+// 任务定义
+void task_uart_send() {
+    while(true) {
+        if (ble_queue_is_empty()) {
+            DELAY(500);
+            continue;
+        }
+        char send_data[MSG_LEN_MAX] = {""};
+        ble_queue_pop((uint8_t *)send_data);
+        uart_write_bytes(uart_num, (const char *)send_data, strlen(send_data));
+        ESP_LOGI(GATTS_TAG, "Uart sending: [%s]\n", send_data);
+        free(send_data);
+    }
+}
+
+void task_uart_recv() {
+    while(true) {
+        int length = 0;
+        char recv_data[MSG_LEN_MAX] = {""};
+        uart_get_buffered_data_len(uart_num, (size_t *)length);
+        if (length > 0) {
+            uart_read_bytes(uart_num, recv_data, length, 100);
+            uart_queue_append((uint8_t *)recv_data);
+            ESP_LOGI(GATTS_TAG, "Uart recving: [%s]\n", recv_data);
+            DELAY(500);
+        }
+        uart_flush(uart_num);
+        free(recv_data);
+    }
+}
+
+
 static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
 
 // GATTS 服务定义
@@ -314,17 +482,27 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
         esp_gatt_rsp_t rsp;
         memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
         rsp.attr_value.handle = param->read.handle;
-        rsp.attr_value.len = 4;
-        rsp.attr_value.value[0] = 0xde;
-        rsp.attr_value.value[1] = 0xed;
-        rsp.attr_value.value[2] = 0xbe;
-        rsp.attr_value.value[3] = 0xef;
+       
+        // TODO
+        char data[MSG_LEN_MAX] = "";
+        uart_queue_pop((uint8_t *)data);
+        rsp.attr_value.len = strlen(data);
+        memcpy(rsp.attr_value.value, (const uint8_t *)data, rsp.attr_value.len);
+
         esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id,
                                     ESP_GATT_OK, &rsp);
+
+        free(data);
         break;
     }
     case ESP_GATTS_WRITE_EVT: { // client端写入数据 server端获取信息
         ESP_LOGI(GATTS_TAG, "Characteristic write, conn_id %d, trans_id %" PRIu32 ", handle %d", param->write.conn_id, param->write.trans_id, param->write.handle);
+
+        char data[MSG_LEN_MAX] = "";
+        memcpy(data, (const char *)param->write.value, param->write.len); 
+        ble_queue_append((uint8_t *)data); 
+        free(data);
+
         if (!param->write.is_prep){
             ESP_LOGI(GATTS_TAG, "value len %d, value ", param->write.len);
             ESP_LOG_BUFFER_HEX(GATTS_TAG, param->write.value, param->write.len);
@@ -382,6 +560,8 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
         gl_profile_tab[PROFILE_APP_ID].service_handle = param->create.service_handle;
         gl_profile_tab[PROFILE_APP_ID].char_uuid.len = ESP_UUID_LEN_16;
         gl_profile_tab[PROFILE_APP_ID].char_uuid.uuid.uuid16 = GATTS_CHAR_UUID_TEST_A;
+        
+        printf("CHRC UUID: %d\n", gl_profile_tab[PROFILE_APP_ID].char_uuid.uuid.uuid16);
 
         esp_ble_gatts_start_service(gl_profile_tab[PROFILE_APP_ID].service_handle);
         chrc_property = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
@@ -556,6 +736,13 @@ void app_main(void)
     if (local_mtu_ret){
         ESP_LOGE(GATTS_TAG, "set local  MTU failed, error code = %x", local_mtu_ret);
     }
+
+    hw_uart_init();
+    ble_queue_init();
+    uart_queue_init();
+
+    xTaskCreate(task_uart_send, "", 1000, NULL, 0, NULL);
+    xTaskCreate(task_uart_recv, "", 1000, NULL, 0, NULL);
 
     return;
 }
