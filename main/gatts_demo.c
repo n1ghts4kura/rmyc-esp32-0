@@ -34,9 +34,10 @@
 
 #include "sdkconfig.h"
 
+#include "hw_uart.h"
 #include "constant.h"
-#include "ble_queue.h"
-#include "uart_queue.h"
+#include "queue/ble_queue.h"
+#include "queue/uart_queue.h"
 
 #define GATTS_TAG "GATTS_APP"
 
@@ -48,110 +49,6 @@
 static ble_queue_t ble_queue;
 static uart_queue_t uart_queue;
 
-// UART Configuration
-QueueHandle_t hw_uart_queue;
-const uart_port_t uart_num = UART_NUM_2;
-const int uart_buffer_size = (1024 * 2);
-uart_config_t uart_config = {
-    .baud_rate = 115200,
-    .data_bits = UART_DATA_8_BITS,
-    .parity    = UART_PARITY_DISABLE,
-    .stop_bits = UART_STOP_BITS_1,
-    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-    .source_clk = UART_SCLK_DEFAULT,
-};
-
-static void hw_uart_init() {
-    ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
-    uart_set_pin(uart_num, GPIO_NUM_4, GPIO_NUM_5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    ESP_ERROR_CHECK(
-        uart_driver_install(
-            uart_num,
-            uart_buffer_size,
-            uart_buffer_size,
-            10,
-            &hw_uart_queue,
-            0
-        )
-    );
-}
-
-// 1. 改进的UART写入函数 - 添加参数验证和更好的错误处理
-static int hw_uart_write(const char* string) {
-    if (!string) {
-        ESP_LOGE("UART", "String is NULL");
-        return 0;
-    }
-    
-    const size_t len = strlen(string);
-    if (len == 0) {
-        ESP_LOGW("UART", "Empty string");
-        return 0;
-    }
-    
-    // 对于文本数据，确保有足够的缓冲区空间
-    if (len >= QUEUE_MSG_LENGTH) {
-        ESP_LOGW("UART", "String too long: %zu bytes, truncating to %d", 
-                 len, QUEUE_MSG_LENGTH - 1);
-    }
-    
-    const int sent = uart_write_bytes(uart_num, string, len);
-    
-    if (sent != len) {
-        ESP_LOGE("UART", "Partial write: %d/%zu bytes", sent, len);
-    } else {
-        ESP_LOGD("UART", "Successfully sent %d bytes", sent);
-    }
-    return sent;
-}
-
-// 2. 改进的UART读取函数 - 更好的字符串处理
-static bool hw_uart_read(char* buffer) {
-    if (!buffer) {
-        ESP_LOGE("UART", "Buffer is NULL");
-        return false;
-    }
-    
-    size_t length = 0;
-    esp_err_t err = uart_get_buffered_data_len(uart_num, &length);
-    
-    if (err != ESP_OK) {
-        ESP_LOGE("UART", "Failed to get buffered data length: %s", esp_err_to_name(err));
-        return false;
-    }
-    
-    if (length <= 0) {
-        return false;
-    }
-    
-    // 确保不会缓冲区溢出，为字符串终止符留空间
-    if (length >= (QUEUE_MSG_LENGTH - 1)) {
-        ESP_LOGW("UART", "Data too long: %zu bytes, truncating to %d", 
-                 length, QUEUE_MSG_LENGTH - 2);
-        length = QUEUE_MSG_LENGTH - 1;
-    }
-    
-    int result = uart_read_bytes(uart_num, (uint8_t*)buffer, 
-                                length, pdMS_TO_TICKS(20));
-    if (result > 0) {
-        buffer[result] = '\0';  // 确保字符串终止
-        
-        // 移除可能的换行符和回车符（清理文本数据）
-        char* end = buffer + result - 1;
-        while (end >= buffer && (*end == '\n' || *end == '\r' || *end == ' ')) {
-            *end = '\0';
-            end--;
-        }
-        
-        // 检查是否还有有效内容
-        if (strlen(buffer) > 0) {
-            ESP_LOGD("UART", "Received clean text: [%s]", buffer);
-            return true;
-        }
-    }
-    return false;
-}
-
 // Uart轮询
 // 3. 改进的UART发送任务
 void task_uart_send(void *pvParameters) {
@@ -159,7 +56,7 @@ void task_uart_send(void *pvParameters) {
     
     while(true) {
         if (ble_queue_empty(&ble_queue)) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
         
@@ -214,7 +111,7 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
 #define GATTS_CHAR_UUID_TEST_A      0xFF01 // Characteristic UUID
 #define GATTS_DEMO_CHAR_VAL_LEN_MAX 0x40   // Characteristic 名称最长长度
 #define GATTS_DESCR_UUID_TEST_A     0x3333 // Descriptor UUID
-#define GATTS_NUM_HANDLE_TEST_A     1      // Max connecting device number
+#define GATTS_NUM_HANDLE_TEST_A     3      // Characteristic 数量 + 1 = GATTS_NUM_HANDLE_TEST_A
 
 // ESP32 蓝牙设备名称
 // 若有多个设备同时使用 记得修改不同esp32设备的名称
@@ -485,41 +382,44 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
         ESP_LOGI(GATTS_TAG, "Characteristic read, conn_id %d, trans_id %" PRIu32 ", handle %d", 
                 param->read.conn_id, param->read.trans_id, param->read.handle);
     
-        uint8_t data[QUEUE_MSG_LENGTH] = {0};
-        if (uart_queue_pop(&uart_queue, data)) {
-            // 确保数据是有效的字符串
-            data[QUEUE_MSG_LENGTH - 1] = '\0';
-            size_t data_len = strlen((char*)data);
+        // 检查 Characteristic 是否对应
+        if (param->read.handle == gl_profile_tab[PROFILE_APP_ID].char_handle) {
+            uint8_t data[QUEUE_MSG_LENGTH] = {0};
+            if (uart_queue_pop(&uart_queue, data)) {
+                // 确保数据是有效的字符串
+                data[QUEUE_MSG_LENGTH - 1] = '\0';
+                size_t data_len = strlen((char*)data);
         
-            if (data_len > 0) {
-                esp_gatt_rsp_t rsp = {
-                    .attr_value = {
-                        .len = data_len,
-                        .handle = param->read.handle,
-                        .offset = 0,
-                        .auth_req = ESP_GATT_AUTH_REQ_NONE
-                    }
-                };
-                memcpy(rsp.attr_value.value, data, data_len);
+                if (data_len > 0) {
+                    esp_gatt_rsp_t rsp = {
+                        .attr_value = {
+                            .len = data_len,
+                            .handle = param->read.handle,
+                            .offset = 0,
+                            .auth_req = ESP_GATT_AUTH_REQ_NONE
+                        }
+                    };
+                    memcpy(rsp.attr_value.value, data, data_len);
             
-                esp_err_t err = esp_ble_gatts_send_response(gatts_if, param->read.conn_id, 
+                    esp_err_t err = esp_ble_gatts_send_response(gatts_if, param->read.conn_id, 
                                                        param->read.trans_id, ESP_GATT_OK, &rsp);
-                if (err == ESP_OK) {
-                    ESP_LOGI(GATTS_TAG, "BLE sent text: [%s] (%zu bytes)", data, data_len);
+                    if (err == ESP_OK) {
+                        ESP_LOGI(GATTS_TAG, "BLE sent text: [%s] (%zu bytes)", data, data_len);
+                    } else {
+                        ESP_LOGE(GATTS_TAG, "Failed to send BLE response: %s", esp_err_to_name(err));
+                    }
                 } else {
-                    ESP_LOGE(GATTS_TAG, "Failed to send BLE response: %s", esp_err_to_name(err));
+                    // 发送空响应
+                    esp_ble_gatts_send_response(gatts_if, param->read.conn_id, 
+                                       param->read.trans_id, ESP_GATT_OK, NULL);
+                    ESP_LOGD(GATTS_TAG, "Sent empty BLE response");
                 }
             } else {
-                // 发送空响应
+                // 队列为空，发送空响应
                 esp_ble_gatts_send_response(gatts_if, param->read.conn_id, 
-                                       param->read.trans_id, ESP_GATT_OK, NULL);
-                ESP_LOGD(GATTS_TAG, "Sent empty BLE response");
-            }
-        } else {
-            // 队列为空，发送空响应
-            esp_ble_gatts_send_response(gatts_if, param->read.conn_id, 
                                    param->read.trans_id, ESP_GATT_OK, NULL);
-            ESP_LOGD(GATTS_TAG, "UART queue empty, sent empty BLE response");
+                ESP_LOGD(GATTS_TAG, "UART queue empty, sent empty BLE response");
+            }
         }
         break;
     }
@@ -527,38 +427,42 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
         ESP_LOGI(GATTS_TAG, "Characteristic write, conn_id %d, trans_id %" PRIu32 ", handle %d", 
                 param->write.conn_id, param->write.trans_id, param->write.handle);
 
-        if (param->write.len > 0 && param->write.len < QUEUE_MSG_LENGTH) {
-            uint8_t data[QUEUE_MSG_LENGTH] = {0};
+        // 检查Characteristic是否对应
+        if (param->write.handle == gl_profile_tab[PROFILE_APP_ID].char_handle) {
+            // 检查异常 或 无用情况
+            if (param->write.len > 0 && param->write.len < QUEUE_MSG_LENGTH) {
+                uint8_t data[QUEUE_MSG_LENGTH] = {0};
 
-            if (param->write.value == NULL) {
-                ESP_LOGE(GATTS_TAG, "Write value is NULL");
-                break;
-            }
-        
-            // 复制数据并确保字符串终止
-            memcpy(data, param->write.value, param->write.len);
-            data[param->write.len] = '\0';  // 确保null终止
-        
-            // 对于文本数据，可以进行一些基本验证
-            bool is_valid_text = true;
-            for (int i = 0; i < param->write.len; i++) {
-                if (data[i] < 32 && data[i] != '\n' && data[i] != '\r' && data[i] != '\t') {
-                    // 发现非打印字符（除了常见的控制字符）
-                    ESP_LOGW(GATTS_TAG, "Non-printable character detected at position %d: 0x%02X", i, data[i]);
-                    is_valid_text = false;
+                if (param->write.value == NULL) {
+                    ESP_LOGE(GATTS_TAG, "Write value is NULL");
                     break;
                 }
-            }
         
-            if (is_valid_text) {
-                if (ble_queue_append(&ble_queue, data)) {
-                    ESP_LOGI(GATTS_TAG, "BLE received text: [%s]", data);
+                // 复制数据并确保字符串终止
+                memcpy(data, param->write.value, param->write.len);
+                data[param->write.len] = '\0';  // 确保null终止
+        
+                // 对于文本数据，可以进行一些基本验证
+                bool is_valid_text = true;
+                for (int i = 0; i < param->write.len; i++) {
+                    if (data[i] < 32 && data[i] != '\n' && data[i] != '\r' && data[i] != '\t') {
+                        // 发现非打印字符（除了常见的控制字符）
+                        ESP_LOGW(GATTS_TAG, "Non-printable character detected at position %d: 0x%02X", i, data[i]);
+                        is_valid_text = false;
+                        break;
+                    }
+                }
+        
+                if (is_valid_text) {
+                    if (ble_queue_append(&ble_queue, data)) {
+                        ESP_LOGI(GATTS_TAG, "BLE received text: [%s]", data);
+                    }
+                } else {
+                    ESP_LOGW(GATTS_TAG, "Received invalid text data, skipping");
                 }
             } else {
-                ESP_LOGW(GATTS_TAG, "Received invalid text data, skipping");
+                ESP_LOGW(GATTS_TAG, "Invalid write length: %d; excepted: %d", param->write.len, QUEUE_MSG_LENGTH);
             }
-        } else {
-            ESP_LOGW(GATTS_TAG, "Invalid write length: %d", param->write.len);
         }
         break;
 
@@ -625,7 +529,7 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
         printf("CHRC UUID: %d\n", gl_profile_tab[PROFILE_APP_ID].char_uuid.uuid.uuid16);
 
         esp_ble_gatts_start_service(gl_profile_tab[PROFILE_APP_ID].service_handle);
-        chrc_property = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+        chrc_property = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE/* | ESP_GATT_CHAR_PROP_BIT_NOTIFY*/;
         esp_err_t add_char_ret = esp_ble_gatts_add_char(gl_profile_tab[PROFILE_APP_ID].service_handle, &gl_profile_tab[PROFILE_APP_ID].char_uuid,
                                                         ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
                                                         chrc_property,

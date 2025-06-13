@@ -30,7 +30,7 @@ typedef struct ble_queue_t {
 } ble_queue_t;
 
 // 初始化队列（线程安全）
-inline void ble_queue_init(ble_queue_t *q) {
+void ble_queue_init(ble_queue_t *q) {
     q->front = NULL;
     q->rear = NULL;
     q->mutex = xSemaphoreCreateMutex();
