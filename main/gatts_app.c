@@ -1,6 +1,7 @@
 /*
- * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
+ * gatts_app.c
  *
+ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  * 
  * @author *espressif coders*, n1ghts4kura
@@ -8,6 +9,9 @@
  * @link github.com/n1ghts4kura
  * 
  * Thanks to the great coders.
+ * 
+ * 项目核心文件
+ * 作用：启动服务
  */
 
 
@@ -22,7 +26,6 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
-
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 #include "esp_bt_defs.h"
@@ -31,99 +34,53 @@
 #include "esp_gatt_common_api.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
-
 #include "sdkconfig.h"
 
+#include "utils.h"
+#include "my_queue.h"
 #include "hw_uart.h"
-#include "constant.h"
-#include "queue/ble_queue.h"
-#include "queue/uart_queue.h"
+#include "app_tasks.h"
 
 #define GATTS_TAG "GATTS_APP"
 
-#define DELAY(x) \
-    do { \
-        vTaskDelay((x) / portTICK_PERIOD_MS); \
-    } while (0);
 
-static ble_queue_t ble_queue;
-static uart_queue_t uart_queue;
+// 蓝牙写缓冲区
+typedef struct {
+    uint8_t                 *prepare_buf;
+    int                     prepare_len;
+} prepare_type_env_t;
+static prepare_type_env_t prepare_write_env;
 
-// Uart轮询
-// 3. 改进的UART发送任务
-void task_uart_send(void *pvParameters) {
-    uint8_t send_data[QUEUE_MSG_LENGTH] = {0};
-    
-    while(true) {
-        if (ble_queue_empty(&ble_queue)) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-        
-        if (ble_queue_pop(&ble_queue, send_data)) {
-            // 确保数据以null结尾（对于文本数据很重要）
-            send_data[QUEUE_MSG_LENGTH - 1] = '\0';
-            
-            // 检查是否为有效的文本字符串
-            if (strlen((char*)send_data) > 0) {
-                int sent = hw_uart_write((const char*)send_data);
-                if (sent > 0) {
-                    ESP_LOGI(GATTS_TAG, "Uart sent: [%s] (%d bytes)", send_data, sent);
-                }
-            } else {
-                ESP_LOGW(GATTS_TAG, "Skipped empty message");
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
+void example_write_event_env(esp_gatt_if_t gatts_if, prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param);
+void example_exec_write_event_env(prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param);
 
-// 4. 改进的UART接收任务
-void task_uart_recv(void *pvParameters) {
-    char recv_buffer[QUEUE_MSG_LENGTH] = {0};
-    uint8_t queue_data[QUEUE_MSG_LENGTH] = {0};
-    
-    while(true) {
-        // 清空缓冲区
-        memset(recv_buffer, 0, sizeof(recv_buffer));
-        
-        if (hw_uart_read(recv_buffer)) {
-            // 将接收到的文本数据复制到队列缓冲区
-            strncpy((char*)queue_data, recv_buffer, QUEUE_MSG_LENGTH - 1);
-            queue_data[QUEUE_MSG_LENGTH - 1] = '\0';  // 确保null终止
-            
-            if (uart_queue_append(&uart_queue, queue_data)) {
-                ESP_LOGI(GATTS_TAG, "Uart recv: [%s] (len: %zu)", 
-                         queue_data, strlen((char*)queue_data));
-            } else {
-                ESP_LOGE(GATTS_TAG, "Failed to append to UART queue");
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
+// 队列
+static my_queue_t queue_pi2esp;
+static my_queue_t queue_bot2esp;
 
-
+/**
+ * 本文件你需要理解的最重要的函数
+ * 
+ * @param event 事件标识
+ * @param gatts_if TODO:补全
+ * @param param 数据指针
+ */
 static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
 
 // GATTS 服务定义
-#define GATTS_SERVICE_UUID_TEST_A   0x00FF // Service UUID
-#define GATTS_CHAR_UUID_TEST_A      0xFF01 // Characteristic UUID
-#define GATTS_DEMO_CHAR_VAL_LEN_MAX 0x40   // Characteristic 名称最长长度
-#define GATTS_DESCR_UUID_TEST_A     0x3333 // Descriptor UUID
-#define GATTS_NUM_HANDLE_TEST_A     3      // Characteristic 数量 + 1 = GATTS_NUM_HANDLE_TEST_A
+#define GATTS_SERVICE_UUID       0x00FF // Service UUID
+#define GATTS_CHAR_UUID          0xFF01 // Characteristic UUID
+#define GATTS_CHAR_VAL_LEN_MAX   0x40   // Characteristic 名称最长长度
+#define GATTS_NUM_HANDLE_TEST_A  3      // Characteristic 数量 + 1 = GATTS_NUM_HANDLE_TEST_A
 
 // ESP32 蓝牙设备名称
 // 若有多个设备同时使用 记得修改不同esp32设备的名称
 static char test_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "RMYC_ESP32_1";
 
-// 设备制造商的数据
-// *Currently unused* *暂时未使用*
-// #define TEST_MANUFACTURER_DATA_LEN  17
-
 // 蓝牙写缓冲区大小 (byte)
-#define PREPARE_BUF_MAX_SIZE 1024
+#define PREPARE_BUF_MAX_SIZE 1536 // 1024 * 1.5
 
+// Characteristic 配置 均无需特别在意 不影响理解
 // Characteristic 初始数据
 static uint8_t char1_str[] = {0x11,0x22,0x33};
 // Characteristic 状态变量
@@ -131,19 +88,20 @@ static esp_gatt_char_prop_t chrc_property = 0;
 // Characteristic 属性结构
 static esp_attr_value_t gatts_demo_char1_val =
 {
-    .attr_max_len = GATTS_DEMO_CHAR_VAL_LEN_MAX,
+    .attr_max_len = GATTS_CHAR_VAL_LEN_MAX,
     .attr_len     = sizeof(char1_str),
     .attr_value   = char1_str,
 };
-// 蓝牙广播配置 标志变量
-/**
+
+/* 蓝牙广播配置 标志变量
  * 初始值为0
  * 广播数据先设置完成 此时调用adv_config_flag 值为?
- * 然后不知道....自己看代码吧 应该会用就行
+ * 然后不知道....自己看代码吧 知道怎么用就行
  */
 static uint8_t adv_config_done = 0;
 #define adv_config_flag      (1 << 0) // 设置广播数据完成
 #define scan_rsp_config_flag (1 << 1) // 开始扫描
+
 // Service UUID
 static uint8_t adv_service_uuid128[32] = {
     /* LSB <--------------------------------------------------------------------------------> MSB */
@@ -153,7 +111,7 @@ static uint8_t adv_service_uuid128[32] = {
     0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00,
 };
 
-// The length of adv data must be less than 31 bytes
+// The length of adv data *must be less than 31 bytes*
 // static uint8_t test_manufacturer[TEST_MANUFACTURER_DATA_LEN] =  {0x12, 0x23, 0x45, 0x56};
 // adv data
 // 蓝牙广播时发送的数据
@@ -172,8 +130,9 @@ static esp_ble_adv_data_t adv_data = {
     .p_service_uuid = adv_service_uuid128,
     .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
+
 // scan response data
-// 如何响应 扫描操作 的一个struct
+// 如何响应 扫描操作 的一个数据
 static esp_ble_adv_data_t scan_rsp_data = {
     .set_scan_rsp = true,
     .include_name = true,
@@ -189,6 +148,7 @@ static esp_ble_adv_data_t scan_rsp_data = {
     .p_service_uuid = adv_service_uuid128,
     .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
+
 // 广播参数配置
 static esp_ble_adv_params_t adv_params = {
     .adv_int_min        = 0x20, // 广播间隔时间 Adv interval time
@@ -201,9 +161,13 @@ static esp_ble_adv_params_t adv_params = {
     .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY, // 连接设备过滤 默认为不过滤
 };
 
+// GATT服务 配置
+
+// 服务下应用数量
 #define PROFILE_NUM 1
+// 应用1 的id
 #define PROFILE_APP_ID 0
-// GATTS服务 APP定义(吧?)
+// GATTS服务 APP定义
 struct gatts_profile_inst {
     esp_gatts_cb_t gatts_cb; // 响应连接等事件的函数
     uint16_t gatts_if;
@@ -219,24 +183,17 @@ struct gatts_profile_inst {
     esp_bt_uuid_t descr_uuid;
 };
 
-/* One gatt-based profile one app_id and one gatts_if, this array will store the gatts_if returned by ESP_GATTS_REG_EVT */
+/* One gatt-based profile one app_id and one gatts_if, this array will store the gatts_if returned by ESP_GATTS_REG_EVT
+ * 相当于是应用的句柄(吧)
+ */
 static struct gatts_profile_inst gl_profile_tab[PROFILE_NUM] = {
     [PROFILE_APP_ID] = {
         .gatts_cb = my_profile_event_handler,
         .gatts_if = ESP_GATT_IF_NONE,       /* Not get the gatt_if, so initial is ESP_GATT_IF_NONE */
     },
 };
-// 蓝牙写缓冲区
-typedef struct {
-    uint8_t                 *prepare_buf;
-    int                     prepare_len;
-} prepare_type_env_t;
-static prepare_type_env_t prepare_write_env;
 
-void example_write_event_env(esp_gatt_if_t gatts_if, prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param);
-void example_exec_write_event_env(prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param);
-
-// GAP 响应器
+// GAP 响应器 是GATT服务的低级一层配置
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     switch (event) {
@@ -252,7 +209,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             esp_ble_gap_start_advertising(&adv_params); // 开始广播
         }
         break;
-    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT: // 启动广播完成
+    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT: // 启动广播
         //advertising start complete event to indicate advertising start successfully or failed
         if (param->adv_start_cmpl.status != ESP_BT_STATUS_SUCCESS) {
             ESP_LOGE(GATTS_TAG, "Advertising start failed, status %d", param->adv_start_cmpl.status);
@@ -260,7 +217,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         }
         ESP_LOGI(GATTS_TAG, "Advertising start successfully");
         break;
-    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT: // 停止广播完成
+    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT: // 停止广播
         if (param->adv_start_cmpl.status != ESP_BT_STATUS_SUCCESS) {
             ESP_LOGE(GATTS_TAG, "Advertising stop failed, status %d", param->adv_stop_cmpl.status);
             break;
@@ -285,67 +242,39 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
 }
 
-// 将缓冲区数据 输出
-void example_write_event_env(esp_gatt_if_t gatts_if, prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param){
-    esp_gatt_status_t status = ESP_GATT_OK;
-    if (param->write.need_rsp){
-        if (param->write.is_prep) {
-            if (param->write.offset > PREPARE_BUF_MAX_SIZE) {
-                status = ESP_GATT_INVALID_OFFSET;
-            } else if ((param->write.offset + param->write.len) > PREPARE_BUF_MAX_SIZE) {
-                status = ESP_GATT_INVALID_ATTR_LEN;
-            }
-            if (status == ESP_GATT_OK && prepare_write_env->prepare_buf == NULL) {
-                prepare_write_env->prepare_buf = (uint8_t *)malloc(PREPARE_BUF_MAX_SIZE*sizeof(uint8_t));
-                prepare_write_env->prepare_len = 0;
-                if (prepare_write_env->prepare_buf == NULL) {
-                    ESP_LOGE(GATTS_TAG, "Gatt_server prep no mem");
-                    status = ESP_GATT_NO_RESOURCES;
-                }
-            }
 
-            esp_gatt_rsp_t *gatt_rsp = (esp_gatt_rsp_t *)malloc(sizeof(esp_gatt_rsp_t));
-            if (gatt_rsp) {
-                gatt_rsp->attr_value.len = param->write.len;
-                gatt_rsp->attr_value.handle = param->write.handle;
-                gatt_rsp->attr_value.offset = param->write.offset;
-                gatt_rsp->attr_value.auth_req = ESP_GATT_AUTH_REQ_NONE;
-                memcpy(gatt_rsp->attr_value.value, param->write.value, param->write.len);
-                esp_err_t response_err = esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, status, gatt_rsp);
-                if (response_err != ESP_OK){
-                    ESP_LOGE(GATTS_TAG, "Send response error\n");
-                }
-                free(gatt_rsp);
-            } else {
-                ESP_LOGE(GATTS_TAG, "malloc failed, no resource to send response error\n");
-                status = ESP_GATT_NO_RESOURCES;
-            }
-            if (status != ESP_GATT_OK){
-                return;
-            }
-            memcpy(prepare_write_env->prepare_buf + param->write.offset,
-                   param->write.value,
-                   param->write.len);
-            prepare_write_env->prepare_len += param->write.len;
 
-        }else{
-            esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, status, NULL);
+// GATTS服务 事件处理器
+static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
+{
+    /* If event is register event, store the gatts_if for each profile */
+    if (event == ESP_GATTS_REG_EVT) {
+        if (param->reg.status == ESP_GATT_OK) {
+            gl_profile_tab[param->reg.app_id].gatts_if = gatts_if;
+        } else {
+            ESP_LOGI(GATTS_TAG, "Reg app failed, app_id %04x, status %d",
+                    param->reg.app_id,
+                    param->reg.status);
+            return;
         }
     }
-}
 
-// 监测缓冲区写入事件
-void example_exec_write_event_env(prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param){
-    if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC){
-        ESP_LOG_BUFFER_HEX(GATTS_TAG, prepare_write_env->prepare_buf, prepare_write_env->prepare_len);
-    }else{
-        ESP_LOGI(GATTS_TAG,"Prepare write cancel");
-    }
-    if (prepare_write_env->prepare_buf) {
-        free(prepare_write_env->prepare_buf);
-        prepare_write_env->prepare_buf = NULL;
-    }
-    prepare_write_env->prepare_len = 0;
+    /* If the gatts_if equal to profile A, call profile A cb handler,
+     * so here call each profile's callback
+     *
+     * 触发 APP所对应的事件处理函数
+     */
+    do {
+        int idx;
+        for (idx = 0; idx < PROFILE_NUM; idx++) {
+            if (gatts_if == ESP_GATT_IF_NONE || /* ESP_GATT_IF_NONE, not specify a certain gatt_if, need to call every profile cb function */
+                    gatts_if == gl_profile_tab[idx].gatts_if) {
+                if (gl_profile_tab[idx].gatts_cb) {
+                    gl_profile_tab[idx].gatts_cb(event, gatts_if, param);
+                }
+            }
+        }
+    } while (0);
 }
 
 /**
@@ -359,7 +288,7 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
         gl_profile_tab[PROFILE_APP_ID].service_id.is_primary = true;
         gl_profile_tab[PROFILE_APP_ID].service_id.id.inst_id = 0x00;
         gl_profile_tab[PROFILE_APP_ID].service_id.id.uuid.len = ESP_UUID_LEN_16;
-        gl_profile_tab[PROFILE_APP_ID].service_id.id.uuid.uuid.uuid16 = GATTS_SERVICE_UUID_TEST_A;
+        gl_profile_tab[PROFILE_APP_ID].service_id.id.uuid.uuid.uuid16 = GATTS_SERVICE_UUID;
 
         esp_err_t set_dev_name_ret = esp_ble_gap_set_device_name(test_device_name);
         if (set_dev_name_ret){
@@ -378,14 +307,20 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
         adv_config_done |= scan_rsp_config_flag;
         esp_ble_gatts_create_service(gatts_if, &gl_profile_tab[PROFILE_APP_ID].service_id, GATTS_NUM_HANDLE_TEST_A);
         break;
-    case ESP_GATTS_READ_EVT: { // client端获取数据 server端发送数据
+    case ESP_GATTS_READ_EVT: {
+        /**
+         * 本事件发生意味着
+         * 上位机(raspi)要求中间层(esp32)返回下位机(robomaster ep)所发送的数据
+         * 所以中间层(esp32)现在要将缓存在*queue_bot2esp*数据传送给上位机(raspi)
+         */
+
         ESP_LOGI(GATTS_TAG, "Characteristic read, conn_id %d, trans_id %" PRIu32 ", handle %d", 
                 param->read.conn_id, param->read.trans_id, param->read.handle);
     
         // 检查 Characteristic 是否对应
         if (param->read.handle == gl_profile_tab[PROFILE_APP_ID].char_handle) {
             uint8_t data[QUEUE_MSG_LENGTH] = {0};
-            if (uart_queue_pop(&uart_queue, data)) {
+            if (queue_pop(&queue_bot2esp, data)) {
                 // 确保数据是有效的字符串
                 data[QUEUE_MSG_LENGTH - 1] = '\0';
                 size_t data_len = strlen((char*)data);
@@ -404,26 +339,34 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
                     esp_err_t err = esp_ble_gatts_send_response(gatts_if, param->read.conn_id, 
                                                        param->read.trans_id, ESP_GATT_OK, &rsp);
                     if (err == ESP_OK) {
-                        ESP_LOGI(GATTS_TAG, "BLE sent text: [%s] (%zu bytes)", data, data_len);
+                        ESP_LOGI(GATTS_TAG, "BLE sent text to Raspi: [%s] (%zu bytes)", data, data_len);
                     } else {
                         ESP_LOGE(GATTS_TAG, "Failed to send BLE response: %s", esp_err_to_name(err));
                     }
                 } else {
+                    esp_gatt_rsp_t rsp = get_empty_gatt_read_rsp(param);
                     // 发送空响应
                     esp_ble_gatts_send_response(gatts_if, param->read.conn_id, 
-                                       param->read.trans_id, ESP_GATT_OK, NULL);
-                    ESP_LOGD(GATTS_TAG, "Sent empty BLE response");
+                                       param->read.trans_id, ESP_GATT_OK, &rsp);
+                    ESP_LOGI(GATTS_TAG, "Sent empty BLE response");
                 }
             } else {
+                esp_gatt_rsp_t rsp = get_empty_gatt_read_rsp(param);
                 // 队列为空，发送空响应
                 esp_ble_gatts_send_response(gatts_if, param->read.conn_id, 
-                                   param->read.trans_id, ESP_GATT_OK, NULL);
-                ESP_LOGD(GATTS_TAG, "UART queue empty, sent empty BLE response");
+                                   param->read.trans_id, ESP_GATT_OK, &rsp);
+                ESP_LOGI(GATTS_TAG, "UART queue empty, sent empty BLE response");
             }
         }
+        ESP_LOGI(GATTS_TAG, "ESP_GATTS_READ_EVT out.");
         break;
     }
-    case ESP_GATTS_WRITE_EVT: { // client端写入数据 server端获取信息
+    case ESP_GATTS_WRITE_EVT: {
+        /**
+         * 本事件发生意味着
+         * 上位机(raspi)向中间层(esp32)发送了数据
+         * 所以中间层(esp32)现在要将数据缓存在*queue_pi2esp*
+         */
         ESP_LOGI(GATTS_TAG, "Characteristic write, conn_id %d, trans_id %" PRIu32 ", handle %d", 
                 param->write.conn_id, param->write.trans_id, param->write.handle);
 
@@ -454,9 +397,10 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
                 }
         
                 if (is_valid_text) {
-                    if (ble_queue_append(&ble_queue, data)) {
-                        ESP_LOGI(GATTS_TAG, "BLE received text: [%s]", data);
+                    if (queue_append(&queue_pi2esp, data)) {
+                        ESP_LOGI(GATTS_TAG, "BLE received data from Raspi: [%s]", data);
                     }
+                    // hw_uart_write((const char* )data);
                 } else {
                     ESP_LOGW(GATTS_TAG, "Received invalid text data, skipping");
                 }
@@ -465,50 +409,6 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
             }
         }
         break;
-
-        /* SOURCE CODE - DO NOT EDIT IT
-        if (!param->write.is_prep){
-            ESP_LOGI(GATTS_TAG, "value len %d, value ", param->write.len);
-            ESP_LOG_BUFFER_HEX(GATTS_TAG, param->write.value, param->write.len);
-            if (gl_profile_tab[PROFILE_APP_ID].descr_handle == param->write.handle && param->write.len == 2){
-                uint16_t descr_value = param->write.value[1]<<8 | param->write.value[0];
-                if (descr_value == 0x0001){
-                    if (chrc_property & ESP_GATT_CHAR_PROP_BIT_NOTIFY){
-                        ESP_LOGI(GATTS_TAG, "Notification enable");
-                        uint8_t notify_data[15];
-                        for (int i = 0; i < sizeof(notify_data); ++i)
-                        {
-                            notify_data[i] = i%0xff;
-                        }
-                        //the size of notify_data[] need less than MTU size
-                        esp_ble_gatts_send_indicate(gatts_if, param->write.conn_id, gl_profile_tab[PROFILE_APP_ID].char_handle,
-                                                sizeof(notify_data), notify_data, false);
-                    }
-                }else if (descr_value == 0x0002){
-                    if (chrc_property & ESP_GATT_CHAR_PROP_BIT_INDICATE){
-                        ESP_LOGI(GATTS_TAG, "Indication enable");
-                        uint8_t indicate_data[15];
-                        for (int i = 0; i < sizeof(indicate_data); ++i)
-                        {
-                            indicate_data[i] = i%0xff;
-                        }
-                        //the size of indicate_data[] need less than MTU size
-                        esp_ble_gatts_send_indicate(gatts_if, param->write.conn_id, gl_profile_tab[PROFILE_APP_ID].char_handle,
-                                                sizeof(indicate_data), indicate_data, true);
-                    }
-                }
-                else if (descr_value == 0x0000){
-                    ESP_LOGI(GATTS_TAG, "Notification/Indication disable");
-                }else{
-                    ESP_LOGE(GATTS_TAG, "Unknown descriptor value");
-                    ESP_LOG_BUFFER_HEX(GATTS_TAG, param->write.value, param->write.len);
-                }
-
-            }
-        }
-        example_write_event_env(gatts_if, &prepare_write_env, param);
-        break;
-        */
     }
     case ESP_GATTS_EXEC_WRITE_EVT: // client 尝试执行写入操作
         ESP_LOGI(GATTS_TAG,"Execute write");
@@ -524,7 +424,7 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
         ESP_LOGI(GATTS_TAG, "Service create, status %d, service_handle %d", param->create.status, param->create.service_handle);
         gl_profile_tab[PROFILE_APP_ID].service_handle = param->create.service_handle;
         gl_profile_tab[PROFILE_APP_ID].char_uuid.len = ESP_UUID_LEN_16;
-        gl_profile_tab[PROFILE_APP_ID].char_uuid.uuid.uuid16 = GATTS_CHAR_UUID_TEST_A;
+        gl_profile_tab[PROFILE_APP_ID].char_uuid.uuid.uuid16 = GATTS_CHAR_UUID;
         
         printf("CHRC UUID: %d\n", gl_profile_tab[PROFILE_APP_ID].char_uuid.uuid.uuid16);
 
@@ -614,36 +514,6 @@ static void my_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
     }
 }
 
-// GATTS服务 事件处理器
-static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
-{
-    /* If event is register event, store the gatts_if for each profile */
-    if (event == ESP_GATTS_REG_EVT) {
-        if (param->reg.status == ESP_GATT_OK) {
-            gl_profile_tab[param->reg.app_id].gatts_if = gatts_if;
-        } else {
-            ESP_LOGI(GATTS_TAG, "Reg app failed, app_id %04x, status %d",
-                    param->reg.app_id,
-                    param->reg.status);
-            return;
-        }
-    }
-
-    /* If the gatts_if equal to profile A, call profile A cb handler,
-     * so here call each profile's callback */
-    do {
-        int idx;
-        for (idx = 0; idx < PROFILE_NUM; idx++) {
-            if (gatts_if == ESP_GATT_IF_NONE || /* ESP_GATT_IF_NONE, not specify a certain gatt_if, need to call every profile cb function */
-                    gatts_if == gl_profile_tab[idx].gatts_if) {
-                if (gl_profile_tab[idx].gatts_cb) {
-                    gl_profile_tab[idx].gatts_cb(event, gatts_if, param);
-                }
-            }
-        }
-    } while (0);
-}
-
 void app_main(void)
 {
     esp_err_t ret;
@@ -703,12 +573,80 @@ void app_main(void)
     }
 
     hw_uart_init();
-    ble_queue_init(&ble_queue);
-    uart_queue_init(&uart_queue);
-    // hw_uart_write("command;");
+    queue_init(&queue_pi2esp);
+    queue_init(&queue_bot2esp);
 
-    xTaskCreate(task_uart_send, "uart_send", 4096, NULL, 1, NULL);
-    xTaskCreate(task_uart_recv, "uart_recv", 4096, NULL, 1, NULL);
-
+    xTaskCreate(task1, "task1", 4096, &queue_pi2esp, 1, NULL);
+    xTaskCreate(task2, "task2", 4096, &queue_bot2esp, 1, NULL);
     return;
 }
+
+
+
+// -------------
+// 下文均无需太在意 因为不知道用不用的到 问就是笔者偷懒了
+
+// 将缓冲区数据 输出
+void example_write_event_env(esp_gatt_if_t gatts_if, prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param){
+    esp_gatt_status_t status = ESP_GATT_OK;
+    if (param->write.need_rsp){
+        if (param->write.is_prep) {
+            if (param->write.offset > PREPARE_BUF_MAX_SIZE) {
+                status = ESP_GATT_INVALID_OFFSET;
+            } else if ((param->write.offset + param->write.len) > PREPARE_BUF_MAX_SIZE) {
+                status = ESP_GATT_INVALID_ATTR_LEN;
+            }
+            if (status == ESP_GATT_OK && prepare_write_env->prepare_buf == NULL) {
+                prepare_write_env->prepare_buf = (uint8_t *)malloc(PREPARE_BUF_MAX_SIZE*sizeof(uint8_t));
+                prepare_write_env->prepare_len = 0;
+                if (prepare_write_env->prepare_buf == NULL) {
+                    ESP_LOGE(GATTS_TAG, "Gatt_server prep no mem");
+                    status = ESP_GATT_NO_RESOURCES;
+                }
+            }
+
+            esp_gatt_rsp_t *gatt_rsp = (esp_gatt_rsp_t *)malloc(sizeof(esp_gatt_rsp_t));
+            if (gatt_rsp) {
+                gatt_rsp->attr_value.len = param->write.len;
+                gatt_rsp->attr_value.handle = param->write.handle;
+                gatt_rsp->attr_value.offset = param->write.offset;
+                gatt_rsp->attr_value.auth_req = ESP_GATT_AUTH_REQ_NONE;
+                memcpy(gatt_rsp->attr_value.value, param->write.value, param->write.len);
+                esp_err_t response_err = esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, status, gatt_rsp);
+                if (response_err != ESP_OK){
+                    ESP_LOGE(GATTS_TAG, "Send response error\n");
+                }
+                free(gatt_rsp);
+            } else {
+                ESP_LOGE(GATTS_TAG, "malloc failed, no resource to send response error\n");
+                status = ESP_GATT_NO_RESOURCES;
+            }
+            if (status != ESP_GATT_OK){
+                return;
+            }
+            memcpy(prepare_write_env->prepare_buf + param->write.offset,
+                   param->write.value,
+                   param->write.len);
+            prepare_write_env->prepare_len += param->write.len;
+
+        }else{
+            esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, status, NULL);
+        }
+    }
+}
+
+// 监测缓冲区写入事件
+void example_exec_write_event_env(prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param){
+    if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC){
+        ESP_LOG_BUFFER_HEX(GATTS_TAG, prepare_write_env->prepare_buf, prepare_write_env->prepare_len);
+    }else{
+        ESP_LOGI(GATTS_TAG,"Prepare write cancel");
+    }
+    if (prepare_write_env->prepare_buf) {
+        free(prepare_write_env->prepare_buf);
+        prepare_write_env->prepare_buf = NULL;
+    }
+    prepare_write_env->prepare_len = 0;
+}
+// -------------
+

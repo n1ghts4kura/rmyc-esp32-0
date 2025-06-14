@@ -3,6 +3,8 @@
  * @author n1ghts4kura
  * @date 25/6/13 - ___
  * 
+ * 硬件UART 操控
+ * 
  * @brief 若出现 *sdkconfig.h* 中的 *CONFIG_LOG_MAXIMUM_LEVEL* 可无需在意
  */
 
@@ -17,29 +19,38 @@
 #include "driver/gpio.h"
 
 #include "sdkconfig.h"
-
-#include "constant.h"
+#include "my_queue.h"
 
 // UART设置
-#define UART_PORT_NUM UART_NUM_2
-#define UART_BUFFER_SIZE 2048
+#define UART_PORT_NUM UART_NUM_2 // UART 端口号
+#define UART_TX_PORT  GPIO_NUM_4 // UART TX端口
+#define UART_RX_PORT  GPIO_NUM_5 // UART RX端口
+#define UART_BUFFER_SIZE 2048    // UART缓冲区大小
 
+// 硬件UART 操控句柄
 static QueueHandle_t hw_uart_queue;
-
+// UART 配置
 uart_config_t uart_config = {
+    // 波特率
     .baud_rate = 115200,
+    // 数据位
     .data_bits = UART_DATA_8_BITS,
+    // 校验
     .parity    = UART_PARITY_DISABLE,
+    // 停止位
     .stop_bits = UART_STOP_BITS_1,
+    // 流控制
     .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    // TODO: 不知道
     .source_clk = UART_SCLK_DEFAULT,
 };
 
+// 初始化硬件UART
 void hw_uart_init() {
-    ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
-    uart_set_pin(UART_PORT_NUM, GPIO_NUM_4, GPIO_NUM_5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config)); // 注入参数
+    uart_set_pin(UART_PORT_NUM, GPIO_NUM_4, GPIO_NUM_5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE); // 设置UART借口
     ESP_ERROR_CHECK(
-        uart_driver_install(
+        uart_driver_install( // UART 驱动安装
             UART_PORT_NUM,
             UART_BUFFER_SIZE,
             UART_BUFFER_SIZE,
@@ -50,7 +61,12 @@ void hw_uart_init() {
     );
 }
 
-// 1. 改进的UART写入函数 - 添加参数验证和更好的错误处理
+/**
+ * UART写入函数
+ * 
+ * @param string 字符串
+ * @return 实际写入的数据大小 (ps: 计量单位不知道，自己琢磨一下)
+ */
 int hw_uart_write(const char* string) {
     if (!string) {
         ESP_LOGE("UART", "String is NULL");
@@ -74,12 +90,17 @@ int hw_uart_write(const char* string) {
     if (sent != len) {
         ESP_LOGE("UART", "Partial write: %d/%zu bytes", sent, len);
     } else {
-        ESP_LOGD("UART", "Successfully sent %d bytes", sent);
+        ESP_LOGI("UART", "Successfully sent %d bytes", sent);
     }
     return sent;
 }
 
-// 2. 改进的UART读取函数 - 更好的字符串处理
+/**
+ * UART读取函数
+ * 
+ * @param buffer 获取的数据缓冲区
+ * @return 是否获取到了数据
+ */
 bool hw_uart_read(char* buffer) {
     if (!buffer) {
         ESP_LOGE("UART", "Buffer is NULL");
@@ -119,7 +140,7 @@ bool hw_uart_read(char* buffer) {
         
         // 检查是否还有有效内容
         if (strlen(buffer) > 0) {
-            ESP_LOGD("UART", "Received clean text: [%s]", buffer);
+            ESP_LOGI("UART", "Received clean text: [%s]", buffer);
             return true;
         }
     }

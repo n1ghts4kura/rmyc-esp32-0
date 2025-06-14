@@ -1,5 +1,14 @@
-#ifndef UART_QUEUE_H
-#define UART_QUEUE_H
+/**
+ * queue.h
+ * 
+ * @author n1ghts4kura
+ * @date 25/6/13 - ___
+ * 
+ * 队列的实现 使用链表
+ */
+
+#ifndef MY_QUEUE_H
+#define MY_QUEUE_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,44 +16,51 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "constant.h"
 #include "esp_system.h"
 #include "esp_log.h"
-
 #include "sdkconfig.h"
 
-#include "constant.h"
+#include "constants.h"
 
-// static const char* BLE_QUEUE_TAG = "uart_queue";  // 改为 const
-#define UART_QUEUE_TAG "uart_queue"
+#define QUEUE_TAG "queue module"
 
-typedef struct uart_queue_node_t {
+// 链表节点
+typedef struct my_queue_node_t {
     uint8_t value[QUEUE_MSG_LENGTH];  // 固定大小数组
-    struct uart_queue_node_t *next;
-} uart_queue_node_t;
+    struct my_queue_node_t *next;
+} my_queue_node_t;
 
-typedef struct uart_queue_t {
-    uart_queue_node_t *front;
-    uart_queue_node_t *rear;
-    SemaphoreHandle_t mutex;  // 添加互斥锁
-} uart_queue_t;
+// 链表(队列) 定义
+typedef struct my_queue_t {
+    my_queue_node_t *front;
+    my_queue_node_t *rear;
+    SemaphoreHandle_t mutex; // 线程锁 防止多线程访问队列时出现错误
+} my_queue_t;
 
-// 初始化队列（线程安全）
-void uart_queue_init(uart_queue_t *q) {
+/** 
+ * 初始化队列
+ * 
+ * @param q
+ */
+void queue_init(my_queue_t *q) {
     q->front = NULL;
     q->rear = NULL;
     q->mutex = xSemaphoreCreateMutex();
     if (q->mutex == NULL) {
-        ESP_LOGE(UART_QUEUE_TAG, "Mutex creation failed!");
+        ESP_LOGE(QUEUE_TAG, "Mutex creation failed!");
     }
 }
 
-// 销毁队列（释放所有资源）
-void uart_queue_destroy(uart_queue_t *q) {
+/**
+ * 删除队列
+ * 
+ * @param q
+ */
+void queue_destroy(my_queue_t *q) {
     xSemaphoreTake(q->mutex, portMAX_DELAY);
     
     while (q->front != NULL) {
-        uart_queue_node_t *temp = q->front;
+        my_queue_node_t *temp = q->front;
         q->front = q->front->next;
         free(temp);
     }
@@ -54,19 +70,32 @@ void uart_queue_destroy(uart_queue_t *q) {
     vSemaphoreDelete(q->mutex);
 }
 
-bool uart_queue_empty(uart_queue_t *q) {
+/**
+ * 判断队列是否为空
+ * 
+ * @param q
+ * @return 是 / 否
+ */
+bool is_queue_empty(my_queue_t *q) {
     xSemaphoreTake(q->mutex, portMAX_DELAY);
     bool empty = (q->front == NULL);
     xSemaphoreGive(q->mutex);
     return empty;
 }
 
-bool uart_queue_append(uart_queue_t *q, uint8_t val[QUEUE_MSG_LENGTH]) {
+/**
+ * 向队列中添加数据 到队尾
+ * 
+ * @param q
+ * @param val 数据 长度为 QUEUE_MSG_LENGTH
+ * @return 是否成功
+ */
+bool queue_append(my_queue_t *q, uint8_t val[QUEUE_MSG_LENGTH]) {
     xSemaphoreTake(q->mutex, portMAX_DELAY);
     
-    uart_queue_node_t *new_node = (uart_queue_node_t*)malloc(sizeof(uart_queue_node_t));
+    my_queue_node_t *new_node = (my_queue_node_t*)malloc(sizeof(my_queue_node_t));
     if (!new_node) {
-        ESP_LOGE(UART_QUEUE_TAG, "Memory allocation failed");
+        ESP_LOGE(QUEUE_TAG, "Memory allocation failed");
         xSemaphoreGive(q->mutex);
         return false;
     }
@@ -85,7 +114,14 @@ bool uart_queue_append(uart_queue_t *q, uint8_t val[QUEUE_MSG_LENGTH]) {
     return true;
 }
 
-bool uart_queue_pop(uart_queue_t *q, uint8_t val[QUEUE_MSG_LENGTH]) {
+/**
+ * 从队列头中获得最早的数据
+ * 
+ * @param q
+ * @param val 数据指针
+ * @return 是否成功
+ */
+bool queue_pop(my_queue_t *q, uint8_t val[QUEUE_MSG_LENGTH]) {
     xSemaphoreTake(q->mutex, portMAX_DELAY);
     
     if (!q->front) {
@@ -94,7 +130,7 @@ bool uart_queue_pop(uart_queue_t *q, uint8_t val[QUEUE_MSG_LENGTH]) {
     }
 
     memcpy(val, q->front->value, QUEUE_MSG_LENGTH);
-    uart_queue_node_t *temp = q->front;
+    my_queue_node_t *temp = q->front;
     q->front = q->front->next;
     
     if (!q->front) {
@@ -106,4 +142,4 @@ bool uart_queue_pop(uart_queue_t *q, uint8_t val[QUEUE_MSG_LENGTH]) {
     return true;
 }
 
-#endif // BLE_QUEUE_H
+#endif // MY_QUEUE_H
