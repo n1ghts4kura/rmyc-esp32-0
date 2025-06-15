@@ -19,6 +19,8 @@
 #include "driver/uart.h"
 #include "sdkconfig.h"
 
+#include "hw_uart.h"
+
 #define MSG_LEN 512
 #define QUEUE_TAG "queue module"
 
@@ -32,6 +34,9 @@ typedef struct my_queue_t {
     my_queue_node_t *rear;
     SemaphoreHandle_t lock;
 } my_queue_t;
+
+static my_queue_t queue_pi2esp;
+static my_queue_t queue_bot2esp;
 
 void queue_init(my_queue_t *q) {
     q->front = NULL;
@@ -91,85 +96,6 @@ bool queue_pop(my_queue_t *q, uint8_t val[MSG_LEN]) {
     return true;
 }
 
-#define HW_UART_TAG "hw_uart module"
-
-#define UART_PORT_NUM UART_NUM_2
-#define UART_TX_PORT  GPIO_NUM_4
-#define UART_RX_PORT  GPIO_NUM_5
-#define UART_RTS_PORT UART_PIN_NO_CHANGE
-#define UART_CTS_PORT UART_PIN_NO_CHANGE
-#define UART_BUFFER_SIZE 2048
-QueueHandle_t hw_uart_handle;
-uart_config_t uart_config = {
-    .baud_rate = 115200,
-    .data_bits = UART_DATA_8_BITS,
-    .parity = UART_PARITY_DISABLE,
-    .stop_bits = UART_STOP_BITS_1,
-    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-    .source_clk = UART_SCLK_DEFAULT,
-};
-
-void hw_uart_init() {
-    ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
-    uart_set_pin(UART_PORT_NUM, UART_TX_PORT, UART_RX_PORT, UART_RTS_PORT, UART_CTS_PORT);
-    ESP_ERROR_CHECK(uart_driver_install(
-        UART_PORT_NUM,
-        UART_BUFFER_SIZE, UART_BUFFER_SIZE,
-        15,
-        &hw_uart_handle,
-        0
-    ));
-}
-
-int hw_uart_write(char *data) {
-    if (!data) {
-        ESP_LOGI(HW_UART_TAG, "Uart wrote empty string, now quitting...");
-        return 0;
-    }
-
-    data[MSG_LEN - 1] = '\0';
-    const int sent = uart_write_bytes(UART_PORT_NUM, data, strlen(data));
-    ESP_LOGI(HW_UART_TAG, "Uart wrote [%s], ( %d / %d )", data, sent, MSG_LEN);
-
-    return sent;
-}
-
-bool hw_uart_read(char *data) {
-    size_t len = 0;
-    esp_err_t rsp = uart_get_buffered_data_len(UART_PORT_NUM, &len);
-
-    if (rsp != ESP_OK) {
-        ESP_LOGE(HW_UART_TAG, "failed to get buffered data length cuz: %s", esp_err_to_name(rsp));
-        return false;
-    }
-
-    if (len <= 0) return false;
-
-    if (len >= (MSG_LEN - 1)) {
-        ESP_LOGW(HW_UART_TAG, "Uart receive too long: for ( %d / %d )", len, MSG_LEN - 1);
-        len = MSG_LEN - 1;
-    }
-
-    int result = uart_read_bytes(UART_PORT_NUM, (uint8_t *)data, len, pdMS_TO_TICKS(20));
-
-    if (result > 0) {
-        data[result] = '\0';
-
-        char* end = data + result - 1;
-        while (end >= data && (*end == '\n' || *end == '\r' || *end == ' ')) {
-            *end = '\0';
-            end--;
-        }
-
-        if (strlen(data) > 0) {
-            ESP_LOGI(HW_UART_TAG, "Uart receive clean text: [%s]", data);
-            return true;
-        }
-    }
-
-    return false;
-}
-
 #define GATTS_TAG "GATTS_DEMO"
 
 ///Declare the static function
@@ -187,8 +113,6 @@ static void gatts_profile_b_event_handler(esp_gatts_cb_event_t event, esp_gatt_i
 #define GATTS_NUM_HANDLE_TEST_B     4
 
 static char test_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "ESP_GATTS_DEMO";
-
-#define TEST_MANUFACTURER_DATA_LEN  17
 
 #define GATTS_DEMO_CHAR_VAL_LEN_MAX 0x40
 
@@ -208,22 +132,6 @@ static esp_attr_value_t gatts_demo_char1_val =
 static uint8_t adv_config_done = 0;
 #define adv_config_flag      (1 << 0)
 #define scan_rsp_config_flag (1 << 1)
-
-#ifdef CONFIG_EXAMPLE_SET_RAW_ADV_DATA
-static uint8_t raw_adv_data[] = {
-    /* Flags */
-    0x02, ESP_BLE_AD_TYPE_FLAG, 0x06,               // Length 2, Data Type ESP_BLE_AD_TYPE_FLAG, Data 1 (LE General Discoverable Mode, BR/EDR Not Supported)
-    /* TX Power Level */
-    0x02, ESP_BLE_AD_TYPE_TX_PWR, 0xEB,             // Length 2, Data Type ESP_BLE_AD_TYPE_TX_PWR, Data 2 (-21)
-    /* Complete 16-bit Service UUIDs */
-    0x03, ESP_BLE_AD_TYPE_16SRV_CMPL, 0xAB, 0xCD    // Length 3, Data Type ESP_BLE_AD_TYPE_16SRV_CMPL, Data 3 (UUID)
-};
-
-static uint8_t raw_scan_rsp_data[] = {
-    /* Complete Local Name */
-    0x0F, ESP_BLE_AD_TYPE_NAME_CMPL, 'E', 'S', 'P', '_', 'G', 'A', 'T', 'T', 'S', '_', 'D', 'E', 'M', 'O'   // Length 15, Data Type ESP_BLE_AD_TYPE_NAME_CMPL, Data (ESP_GATTS_DEMO)
-};
-#else
 
 static uint8_t adv_service_uuid128[32] = {
     /* LSB <--------------------------------------------------------------------------------> MSB */
@@ -267,8 +175,6 @@ static esp_ble_adv_data_t scan_rsp_data = {
     .p_service_uuid = adv_service_uuid128,
     .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
-
-#endif /* CONFIG_SET_RAW_ADV_DATA */
 
 static esp_ble_adv_params_t adv_params = {
     .adv_int_min        = 0x20,
@@ -887,6 +793,9 @@ void app_main(void)
     if (local_mtu_ret){
         ESP_LOGE(GATTS_TAG, "set local  MTU failed, error code = %x", local_mtu_ret);
     }
+
+    queue_init(&queue_pi2esp);
+    queue_init(&queue_bot2esp);
 
     return;
 }
