@@ -1,4 +1,5 @@
 build/
+.devcontainer/
 
 # Prerequisites
 *.d
