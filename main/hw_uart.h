@@ -55,7 +55,7 @@ int hw_uart_write(char *data) {
     return sent;
 }
 
-bool hw_uart_read(char *data) {
+bool hw_uart_read(uint8_t data[MSG_LEN]) {
     size_t len = 0;
     esp_err_t rsp = uart_get_buffered_data_len(UART_PORT_NUM, &len);
 
@@ -71,24 +71,24 @@ bool hw_uart_read(char *data) {
         len = MSG_LEN - 1;
     }
 
-    int result = uart_read_bytes(UART_PORT_NUM, (uint8_t *)data, len, pdMS_TO_TICKS(20));
+    int result = uart_read_bytes(UART_PORT_NUM, data, len, pdMS_TO_TICKS(20));
 
-    if (result > 0) {
-        data[result] = '\0';
+    // if (result > 0) {
+    //     data[result] = '\0';
 
-        char* end = data + result - 1;
-        while (end >= data && (*end == '\n' || *end == '\r' || *end == ' ')) {
-            *end = '\0';
-            end--;
-        }
+    //     char* end = data + result - 1;
+    //     while (end >= data && (*end == '\n' || *end == '\r' || *end == ' ')) {
+    //         *end = '\0';
+    //         end--;
+    //     }
 
-        if (strlen(data) > 0) {
-            ESP_LOGI(HW_UART_TAG, "Uart receive clean text: [%s]", data);
-            return true;
-        }
-    }
-
-    return false;
+    //     if (strlen(data) > 0) {
+    //         ESP_LOGI(HW_UART_TAG, "Uart receive clean text: [%s]", data);
+    //         return true;
+    //     }
+    // }
+    ESP_LOGI(HW_UART_TAG, "Uart receive text: [%s]", (char *)data);
+    return true;
 }
 
 #endif

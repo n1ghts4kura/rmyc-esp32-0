@@ -20,90 +20,54 @@
 #include "sdkconfig.h"
 
 #include "hw_uart.h"
+#include "my_queue.h"
 
-#define MSG_LEN 512
-#define QUEUE_TAG "queue module"
-
-typedef struct my_queue_node_t {
-    uint8_t val[MSG_LEN];
-    struct my_queue_node_t *next;    
-} my_queue_node_t;
-
-typedef struct my_queue_t {
-    my_queue_node_t *front;
-    my_queue_node_t *rear;
-    SemaphoreHandle_t lock;
-} my_queue_t;
+#define GATTS_TAG "GATTS_DEMO"
 
 static my_queue_t queue_pi2esp;
 static my_queue_t queue_bot2esp;
 
-void queue_init(my_queue_t *q) {
-    q->front = NULL;
-    q->rear = NULL;
-    q->lock = xSemaphoreCreateMutex();
+#define TASK_STACK_SIZE 2560
+
+// pi 2 esp
+void task1(void*) {
+    uint8_t data[MSG_LEN] = {0};
+
+    while (true) {
+
+            if (queue_pop(&queue_pi2esp, data)) {
+                hw_uart_write((char *)data); 
+                ESP_LOGI(GATTS_TAG, "Got data from *Pi*: [%s], now writing to bot...", (char *)data);
+
+                memset(data, 0, MSG_LEN);
+            }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 }
 
-#define LOCK_TAKE(queue) xSemaphoreTake( (queue)->lock , portMAX_DELAY )
-#define LOCK_GIVE(queue) xSemaphoreGive( (queue)->lock )
+// bot 2 esp
+void task2(void*) {
+    uint8_t data[MSG_LEN] = {0};
 
-bool is_queue_empty(my_queue_t *q) {
-    if (LOCK_TAKE(q) == pdFALSE) {
-        ESP_LOGE(QUEUE_TAG, "failed to get lock! (is_queue_empty");
-        return false;
+    while (true) {
+        if (hw_uart_read(data)) {
+            queue_append(&queue_bot2esp, data);
+            ESP_LOGI(HW_UART_TAG, "Got data from *bot*: [%s], now writing to Pi...", (char *)data);
+
+            memset(data, 0, MSG_LEN);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
-    bool rst = q->front == NULL;
-    LOCK_GIVE(q);
-    return rst;
 }
-
-bool queue_append(my_queue_t *q, uint8_t val[MSG_LEN]) {
-    if (LOCK_TAKE(q) == pdFALSE) {
-        ESP_LOGE(QUEUE_TAG, "failed to get lock! (queue_append)");
-        return false;
-    }
-
-    my_queue_node_t *new_node = (my_queue_node_t *)malloc(sizeof(my_queue_node_t));
-    new_node->next = NULL;
-    memcpy(new_node->val, val, MSG_LEN);
-
-    if (!q->rear) {
-        q->front = q->rear = new_node;
-    } else {
-        q->rear->next = new_node;
-        q->rear = new_node;
-    }
-
-    LOCK_GIVE(q);
-    return true;
-}
-
-bool queue_pop(my_queue_t *q, uint8_t val[MSG_LEN]) {
-    if (LOCK_TAKE(q) == pdFALSE) {
-        ESP_LOGE(QUEUE_TAG, "failed to get lock! (queue_pop)");
-        return false;
-    }
-
-    memcpy(val, q->front->val, MSG_LEN);
-    my_queue_node_t *pop = q->front;
-    q->front = q->front->next;
-    if (!q->front) {
-        q->rear = NULL;
-    }
-    free(pop);
-    
-    LOCK_GIVE(q);
-    return true;
-}
-
-#define GATTS_TAG "GATTS_DEMO"
 
 ///Declare the static function
 static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
 
 #define GATTS_SERVICE_UUID   0x00FF
 #define GATTS_CHAR_UUID      0xFF01
-#define GATTS_NUM_HANDLE_TEST_A     4
+#define GATTS_HANDLE_COUNT   4
 
 static char test_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "RMYC_ESP32_1";
 #define GATTS_DEMO_CHAR_VAL_LEN_MAX 0x40
@@ -273,18 +237,37 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             ESP_LOGE(GATTS_TAG, "config scan response data failed, error code = %x", ret);
         }
         adv_config_done |= scan_rsp_config_flag;
-        esp_ble_gatts_create_service(gatts_if, &gatts_profile.service_id, GATTS_NUM_HANDLE_TEST_A);
+        esp_ble_gatts_create_service(gatts_if, &gatts_profile.service_id, GATTS_HANDLE_COUNT);
         break;
     case ESP_GATTS_READ_EVT: {
         ESP_LOGI(GATTS_TAG, "Characteristic read, conn_id %d, trans_id %" PRIu32 ", handle %d", param->read.conn_id, param->read.trans_id, param->read.handle);
-        esp_gatt_rsp_t rsp;
-        memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
-        rsp.attr_value.handle = param->read.handle;
-        rsp.attr_value.len = 4;
-        rsp.attr_value.value[0] = 0xde;
-        rsp.attr_value.value[1] = 0xed;
-        rsp.attr_value.value[2] = 0xbe;
-        rsp.attr_value.value[3] = 0xef;
+        esp_gatt_rsp_t rsp = {
+            .attr_value = {
+                .len = 0,
+                .handle = param->read.handle,
+                .offset = 0,
+                .auth_req = ESP_GATT_AUTH_REQ_NONE,
+            }
+        };
+
+        if (param->read.handle == gatts_profile.char_handle) {
+            uint8_t data[MSG_LEN] = {0};
+
+            if (queue_pop(&queue_bot2esp, data)) {
+                data[MSG_LEN - 1] = '\0';
+                size_t len = strlen((char *)data);
+
+                if (len > 0) {
+                    rsp.attr_value.len = len;
+                    memcpy(rsp.attr_value.value, data, len);
+
+                    ESP_LOGI(GATTS_TAG, "BLE sending to Pi: [%s]", data);
+                }
+            } else {
+                ESP_LOGW(GATTS_TAG, "BLE couldn't pop any data from queue_bot2esp!");
+            }
+        }
+
         esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id,
                                     ESP_GATT_OK, &rsp);
         break;
@@ -449,19 +432,6 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
         }
     }
 
-    /* If the gatts_if equal to profile A, call profile A cb handler,
-     * so here call each profile's callback */
-    // do {
-    //     int idx;
-    //     for (idx = 0; idx < PROFILE_NUM; idx++) {
-    //         if (gatts_if == ESP_GATT_IF_NONE || /* ESP_GATT_IF_NONE, not specify a certain gatt_if, need to call every profile cb function */
-    //                 gatts_if == .gatts_if) {
-    //             if (gl_profile_tab[idx].gatts_cb) {
-    //                 gl_profile_tab[idx].gatts_cb(event, gatts_if, param);
-    //             }
-    //         }
-    //     }
-    // } while (0);
     if (gatts_if == ESP_GATT_IF_NONE || gatts_if == gatts_profile.gatts_if) {
         if (gatts_profile.gatts_cb) {
             gatts_profile.gatts_cb(event, gatts_if, param);
@@ -531,6 +501,11 @@ void app_main(void)
 
     queue_init(&queue_pi2esp);
     queue_init(&queue_bot2esp);
+
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_LOGI(GATTS_TAG, "Now registering tasks.");
+    xTaskCreate(task1, "task1", TASK_STACK_SIZE, NULL, 2, NULL);
+    xTaskCreate(task2, "task2", TASK_STACK_SIZE, NULL, 2, NULL);
 
     return;
 }
