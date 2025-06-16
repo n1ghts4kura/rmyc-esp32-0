@@ -34,13 +34,11 @@ void task1(void*) {
     uint8_t data[MSG_LEN] = {0};
 
     while (true) {
-
-            if (queue_pop(&queue_pi2esp, data)) {
-                hw_uart_write((char *)data); 
-                ESP_LOGI(GATTS_TAG, "Got data from *Pi*: [%s], now writing to bot...", (char *)data);
-
-                memset(data, 0, MSG_LEN);
-            }
+        if (queue_pop(&queue_pi2esp, data)) {
+            hw_uart_write((char *)data); 
+            ESP_LOGI(GATTS_TAG, "Got data from *Pi*: [%s], now writing to bot...", (char *)data);
+            memset(data, 0, MSG_LEN);
+        }
 
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -54,7 +52,6 @@ void task2(void*) {
         if (hw_uart_read(data)) {
             queue_append(&queue_bot2esp, data);
             ESP_LOGI(HW_UART_TAG, "Got data from *bot*: [%s], now writing to Pi...", (char *)data);
-
             memset(data, 0, MSG_LEN);
         }
 
@@ -262,10 +259,14 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                     memcpy(rsp.attr_value.value, data, len);
 
                     ESP_LOGI(GATTS_TAG, "BLE sending to Pi: [%s]", data);
+                } else {
+                    ESP_LOGW(GATTS_TAG, "len < 0");
                 }
             } else {
                 ESP_LOGW(GATTS_TAG, "BLE couldn't pop any data from queue_bot2esp!");
             }
+        } else {
+            ESP_LOGW(GATTS_TAG, "Wrong characteristic used!");
         }
 
         esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id,
@@ -502,7 +503,7 @@ void app_main(void)
     queue_init(&queue_pi2esp);
     queue_init(&queue_bot2esp);
 
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
     ESP_LOGI(GATTS_TAG, "Now registering tasks.");
     xTaskCreate(task1, "task1", TASK_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task2, "task2", TASK_STACK_SIZE, NULL, 2, NULL);
