@@ -50,12 +50,34 @@ void task2(void*) {
 
     while (true) {
         if (hw_uart_read(data)) {
+            if (strlen((char *)data) <= 0) continue;
+
             queue_append(&queue_bot2esp, data);
             ESP_LOGI(HW_UART_TAG, "Got data from *bot*: [%s], now writing to Pi...", (char *)data);
             memset(data, 0, MSG_LEN);
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+void task3(void*) {
+    while (true) {
+        my_queue_node_t *node = queue_pi2esp.front;
+        printf("queue_pi2esp\n");
+        while (node != NULL) {
+            printf("value: [%s]\n", node->val);
+            node = node->next;
+        }
+
+        node = queue_bot2esp.front;
+        printf("queue_bot2esp\n");
+        while (node != NULL) {
+            printf("value: [%s]\n", node->val);
+            node = node->next;
+        }
+        printf("\n"); 
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 
@@ -275,46 +297,29 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
     }
     case ESP_GATTS_WRITE_EVT: {
         ESP_LOGI(GATTS_TAG, "Characteristic write, conn_id %d, trans_id %" PRIu32 ", handle %d", param->write.conn_id, param->write.trans_id, param->write.handle);
-        if (!param->write.is_prep){
-            ESP_LOGI(GATTS_TAG, "value len %d, value ", param->write.len);
-            ESP_LOG_BUFFER_HEX(GATTS_TAG, param->write.value, param->write.len);
-            if (gatts_profile.descr_handle == param->write.handle && param->write.len == 2){
-                uint16_t descr_value = param->write.value[1]<<8 | param->write.value[0];
-                if (descr_value == 0x0001){
-                    if (a_property & ESP_GATT_CHAR_PROP_BIT_NOTIFY){
-                        ESP_LOGI(GATTS_TAG, "Notification enable");
-                        uint8_t notify_data[15];
-                        for (int i = 0; i < sizeof(notify_data); ++i)
-                        {
-                            notify_data[i] = i%0xff;
-                        }
-                        //the size of notify_data[] need less than MTU size
-                        esp_ble_gatts_send_indicate(gatts_if, param->write.conn_id, gatts_profile.char_handle,
-                                                sizeof(notify_data), notify_data, false);
-                    }
-                }else if (descr_value == 0x0002){
-                    if (a_property & ESP_GATT_CHAR_PROP_BIT_INDICATE){
-                        ESP_LOGI(GATTS_TAG, "Indication enable");
-                        uint8_t indicate_data[15];
-                        for (int i = 0; i < sizeof(indicate_data); ++i)
-                        {
-                            indicate_data[i] = i%0xff;
-                        }
-                        //the size of indicate_data[] need less than MTU size
-                        esp_ble_gatts_send_indicate(gatts_if, param->write.conn_id, gatts_profile.char_handle,
-                                                sizeof(indicate_data), indicate_data, true);
-                    }
-                }
-                else if (descr_value == 0x0000){
-                    ESP_LOGI(GATTS_TAG, "Notification/Indication disable");
-                }else{
-                    ESP_LOGE(GATTS_TAG, "Unknown descriptor value");
-                    ESP_LOG_BUFFER_HEX(GATTS_TAG, param->write.value, param->write.len);
+
+        if (param->write.handle == gatts_profile.char_handle) {
+            if (param->write.len >0 && param->write.len < MSG_LEN) {
+                uint8_t data[MSG_LEN] = {0};
+
+                if (param->write.value == NULL) {
+                    ESP_LOGW(GATTS_TAG, "write value is NULL");
+                    break;
                 }
 
+                memcpy(data, param->write.value, param->write.len);
+                data[param->write.len] = '\0';
+
+                if (queue_append(&queue_pi2esp, data)) {
+                    ESP_LOGI(GATTS_TAG, "BLE received data from *Pi*: [%s]", data);
+                } else {
+                    ESP_LOGE(GATTS_TAG, "Couldn't append data to queue_pi2esp!");
+                }
+            } else {
+                ESP_LOGW(GATTS_TAG, "BLE got data of *wrong length* !");
             }
         }
-        // example_write_event_env(gatts_if, &a_prepare_write_env, param);
+
         break;
     }
     case ESP_GATTS_EXEC_WRITE_EVT:
@@ -507,6 +512,7 @@ void app_main(void)
     ESP_LOGI(GATTS_TAG, "Now registering tasks.");
     xTaskCreate(task1, "task1", TASK_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task2, "task2", TASK_STACK_SIZE, NULL, 2, NULL);
+    xTaskCreate(task3, "task3", TASK_STACK_SIZE, NULL, 3, NULL);
 
     return;
 }

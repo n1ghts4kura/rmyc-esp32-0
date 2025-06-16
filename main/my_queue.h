@@ -23,7 +23,7 @@ typedef struct my_queue_node_t {
 typedef struct my_queue_t {
     my_queue_node_t *front;
     my_queue_node_t *rear;
-    SemaphoreHandle_t lock;
+    // SemaphoreHandle_t lock;
 } my_queue_t;
 
 void queue_init(my_queue_t *q) {
@@ -31,8 +31,8 @@ void queue_init(my_queue_t *q) {
     q->rear = NULL;
 }
 
-#define LOCK_TAKE(queue) xSemaphoreTake( (queue)->lock , portMAX_DELAY )
-#define LOCK_GIVE(queue) xSemaphoreGive( (queue)->lock )
+// #define LOCK_TAKE(queue) xSemaphoreTake( (queue)->lock , portMAX_DELAY )
+// #define LOCK_GIVE(queue) xSemaphoreGive( (queue)->lock )
 
 bool is_queue_empty(my_queue_t *q) {
     bool rst = q->front == NULL;
@@ -44,7 +44,7 @@ bool queue_append(my_queue_t *q, uint8_t val[MSG_LEN]) {
     new_node->next = NULL;
     memcpy(new_node->val, val, MSG_LEN);
 
-    if (!q->rear) {
+    if (q->front == NULL) {
         q->front = q->rear = new_node;
     } else {
         q->rear->next = new_node;
