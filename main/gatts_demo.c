@@ -1,3 +1,11 @@
+/**
+ * gatts_demo.c
+ * 
+ * @author n1ghts4kura
+ * @date 2025 q1->q2
+ * 
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,15 +30,23 @@
 #include "hw_uart.h"
 #include "my_queue.h"
 
-#define GATTS_TAG "GATTS_DEMO"
+#define GATTS_TAG "GATTS_APP"
 
+/**
+ * The two queues are used to store the data transmitted between Pi and Bot.
+ */
 static my_queue_t queue_pi2esp;
 static my_queue_t queue_bot2esp;
 
+/**
+ * These are the defines of the task.
+ */
 #define TASK_STACK_SIZE 2560
 
-// pi 2 esp
-void task1(void*) {
+/**
+ * This task is used to take Pi's data to Bot.
+ */
+void task_pi2bot(void*) {
     uint8_t data[MSG_LEN] = {0};
 
     while (true) {
@@ -44,8 +60,10 @@ void task1(void*) {
     }
 }
 
-// bot 2 esp
-void task2(void*) {
+/**
+ * This task is used to take Bot's data to Pi.
+ */
+void task_bot2pi(void*) {
     uint8_t data[MSG_LEN] = {0};
 
     while (true) {
@@ -61,7 +79,7 @@ void task2(void*) {
     }
 }
 
-// #define TASK_LOG_QUEUE // 如果不注释那么将会有调试输出
+// #define TASK_LOG_QUEUE
 #ifdef TASK_LOG_QUEUE
 void task_log_queue(void*) {
     while (true) {
@@ -84,21 +102,27 @@ void task_log_queue(void*) {
 }
 #endif
 
-///Declare the static function
+/**
+ * One of the most important method in the whole project, which is used to 
+ * define how your ESP32 works on BLE.
+ */
 static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
 
+/**
+ * Here are the defines of GATT service in BLE.
+ * 1. Service 2. *Characteristic* 3. Device 4. (useless, don't mind it)
+ */
 #define GATTS_SERVICE_UUID   0x00FF
-#define GATTS_CHAR_UUID      0xFF01
-#define GATTS_HANDLE_COUNT   4
-
-static char test_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "RMYC_ESP32_1";
+#define GATTS_CHAR_UUID      0xFF01 // The uuid is translated to "0000ff01-0000-1000-8000-00805f9b34fb"
+#define GATTS_HANDLE_COUNT   4 // The max count of conencting devices
 #define GATTS_DEMO_CHAR_VAL_LEN_MAX 0x40
 
-// #define PREPARE_BUF_MAX_SIZE 1024
-
+/**
+ * Here are attributes of the characteristic mentioned on top.
+ * Not that necessary.
+ */
 static uint8_t char1_str[] = {0x11,0x22,0x33};
 static esp_gatt_char_prop_t a_property = 0;
-
 static esp_attr_value_t gatts_demo_char1_val =
 {
     .attr_max_len = GATTS_DEMO_CHAR_VAL_LEN_MAX,
@@ -106,6 +130,15 @@ static esp_attr_value_t gatts_demo_char1_val =
     .attr_value   = char1_str,
 };
 
+/**
+ * The name of the ESP32.
+ * TODO: You should change it when using more than one ESP32->Bot module, in order not to mix them up.
+ */
+static char test_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "RMYC_ESP32_1";
+
+/**
+ * The BLE advertising config.
+ */
 static uint8_t adv_config_done = 0;
 #define adv_config_flag      (1 << 0)
 #define scan_rsp_config_flag (1 << 1)
@@ -164,6 +197,12 @@ static esp_ble_adv_params_t adv_params = {
     .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
 };
 
+/**
+ * A struct which stores:
+ *  1. App id
+ *  2. Characteristic handle
+ *  3. ...
+ */
 struct gatts_profile_inst {
     esp_gatts_cb_t gatts_cb;
     uint16_t gatts_if;
@@ -179,6 +218,7 @@ struct gatts_profile_inst {
     esp_bt_uuid_t descr_uuid;
 };
 
+// The count of Services in this application.
 #define PROFILE_NUM 1
 #define PROFILE_A_ID 0x00
 static struct gatts_profile_inst gatts_profile = {
@@ -186,6 +226,10 @@ static struct gatts_profile_inst gatts_profile = {
     .gatts_if = ESP_GATT_IF_NONE,
 };
 
+/**
+ * GAP handler
+ * Not that necessary.
+ */
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     switch (event) {
@@ -234,6 +278,9 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
 }
 
+/**
+ * README.
+ */
 static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param) {
     switch (event) {
     case ESP_GATTS_REG_EVT:
@@ -261,6 +308,13 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
         adv_config_done |= scan_rsp_config_flag;
         esp_ble_gatts_create_service(gatts_if, &gatts_profile.service_id, GATTS_HANDLE_COUNT);
         break;
+
+    /**
+     * One of the most important cases.
+     * This event means that:
+     *  1. *Pi* asks *ESP32* for data.
+     *  2. So *ESP32* needs to take the data *given by BOT* to Pi.
+     */
     case ESP_GATTS_READ_EVT: {
         ESP_LOGI(GATTS_TAG, "Characteristic read, conn_id %d, trans_id %" PRIu32 ", handle %d", param->read.conn_id, param->read.trans_id, param->read.handle);
         esp_gatt_rsp_t rsp = {
@@ -298,6 +352,13 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                                     ESP_GATT_OK, &rsp);
         break;
     }
+
+    /**
+     * One of the most important cases.
+     * This event means that:
+     *  1. *Bot* provides data to *ESP32*.
+     *  2. So *ESP32* needs to take the data *given by Pi* to BOT.
+     */
     case ESP_GATTS_WRITE_EVT: {
         ESP_LOGI(GATTS_TAG, "Characteristic write, conn_id %d, trans_id %" PRIu32 ", handle %d", param->write.conn_id, param->write.trans_id, param->write.handle);
 
@@ -427,6 +488,9 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
     }
 }
 
+/**
+ * The event handler is used to call the gatts_cb method.
+ */
 static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
 {
     /* If event is register event, store the gatts_if for each profile */
@@ -513,8 +577,8 @@ void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     ESP_LOGI(GATTS_TAG, "Now registering tasks.");
-    xTaskCreate(task1, "task1", TASK_STACK_SIZE, NULL, 2, NULL);
-    xTaskCreate(task2, "task2", TASK_STACK_SIZE, NULL, 2, NULL);
+    xTaskCreate(task_pi2bot, "task_pi2bot", TASK_STACK_SIZE, NULL, 2, NULL);
+    xTaskCreate(task_bot2pi, "task_bot2pi", TASK_STACK_SIZE, NULL, 2, NULL);
 
 #ifdef TASK_LOG_QUEUE
     xTaskCreate(task_log_queue, "task3", TASK_STACK_SIZE, NULL, 3, NULL);
