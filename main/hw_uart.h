@@ -1,6 +1,11 @@
 /**
  * hw_uart.h
  * 
+ * @author n1ghts4kura
+ * @date 2025 q1->q2
+ * 
+ * This file defines basic usages of hardware UART.
+ * 
  */
 
 #ifndef HW_UART_H
@@ -14,11 +19,14 @@
 
 #define HW_UART_TAG "hw_uart module"
 
-#define UART_PORT_NUM UART_NUM_2
-#define UART_TX_PORT  GPIO_NUM_4
-#define UART_RX_PORT  GPIO_NUM_5
-#define UART_RTS_PORT UART_PIN_NO_CHANGE
-#define UART_CTS_PORT UART_PIN_NO_CHANGE
+/**
+ * The config of hardware UART.
+ */
+#define UART_PORT_NUM UART_NUM_2 // The UART's port of ESP32
+#define UART_TX_PORT  GPIO_NUM_4 // GPIO of TX
+#define UART_RX_PORT  GPIO_NUM_5 // GPIO of RX
+#define UART_RTS_PORT UART_PIN_NO_CHANGE // GPIO of RTS (not used)
+#define UART_CTS_PORT UART_PIN_NO_CHANGE // GPIO of CTS (not used)
 #define UART_BUFFER_SIZE 2048
 QueueHandle_t hw_uart_handle;
 uart_config_t uart_config = {
@@ -30,6 +38,9 @@ uart_config_t uart_config = {
     .source_clk = UART_SCLK_DEFAULT,
 };
 
+/**
+ * Hardware UART init method.
+ */
 void hw_uart_init() {
     ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
     uart_set_pin(UART_PORT_NUM, UART_TX_PORT, UART_RX_PORT, UART_RTS_PORT, UART_CTS_PORT);
@@ -42,6 +53,12 @@ void hw_uart_init() {
     ));
 }
 
+/**
+ * Write to hardware UART.
+ * 
+ * @param data the target var
+ * @return the size of the data written exactly
+ */
 int hw_uart_write(char *data) {
     if (!data) {
         ESP_LOGI(HW_UART_TAG, "Uart wrote empty string, now quitting...");
@@ -55,6 +72,12 @@ int hw_uart_write(char *data) {
     return sent;
 }
 
+/**
+ * Read from hardware UART.
+ * 
+ * @param data the target var
+ * @return if read successfully
+ */
 bool hw_uart_read(uint8_t data[MSG_LEN]) {
     size_t len = 0;
     esp_err_t rsp = uart_get_buffered_data_len(UART_PORT_NUM, &len);
@@ -73,6 +96,9 @@ bool hw_uart_read(uint8_t data[MSG_LEN]) {
 
     int result = uart_read_bytes(UART_PORT_NUM, data, len, pdMS_TO_TICKS(20));
 
+    /**
+     * Clean text validation.
+     */
     // if (result > 0) {
     //     data[result] = '\0';
 
