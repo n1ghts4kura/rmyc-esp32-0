@@ -61,25 +61,28 @@ void task2(void*) {
     }
 }
 
-void task3(void*) {
+// #define TASK_LOG_QUEUE // 如果不注释那么将会有调试输出
+#ifdef TASK_LOG_QUEUE
+void task_log_queue(void*) {
     while (true) {
         my_queue_node_t *node = queue_pi2esp.front;
-        printf("queue_pi2esp\n");
+        printf("queue_pi2esp\nvalue: [");
         while (node != NULL) {
-            printf("value: [%s]\n", node->val);
+            printf("%s, ", node->val);
             node = node->next;
         }
 
         node = queue_bot2esp.front;
-        printf("queue_bot2esp\n");
+        printf("]\nqueue_bot2esp\nvalue: [");
         while (node != NULL) {
-            printf("value: [%s]\n", node->val);
+            printf("%s, ", node->val);
             node = node->next;
         }
-        printf("\n"); 
+        printf("]\n"); 
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
+#endif
 
 ///Declare the static function
 static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
@@ -512,7 +515,10 @@ void app_main(void)
     ESP_LOGI(GATTS_TAG, "Now registering tasks.");
     xTaskCreate(task1, "task1", TASK_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task2, "task2", TASK_STACK_SIZE, NULL, 2, NULL);
-    xTaskCreate(task3, "task3", TASK_STACK_SIZE, NULL, 3, NULL);
+
+#ifdef TASK_LOG_QUEUE
+    xTaskCreate(task_log_queue, "task3", TASK_STACK_SIZE, NULL, 3, NULL);
+#endif
 
     return;
 }

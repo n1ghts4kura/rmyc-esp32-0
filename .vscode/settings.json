@@ -13,6 +13,12 @@
   "idf.flashType": "UART",
   "files.associations": {
     "freertos.h": "c",
-    "constants.h": "c"
+    "constants.h": "c",
+    "array": "c",
+    "deque": "c",
+    "list": "c",
+    "vector": "c",
+    "string_view": "c",
+    "span": "c"
   }
 }
