@@ -33,6 +33,15 @@
 #define GATTS_TAG "GATTS_APP"
 
 /**
+ * TODO:
+ * If you turn on this, the event of "exec_write" wouldn't be handled.
+ * In my opinion, in most cases this event is useless, so i choose to turn it off.
+ * If you turn it off, maybe sometimes it will go wrong because of the data transmitted is too big.
+ * So, you know what to do.
+ */
+// #define EXEC_WRITE_ON
+
+/**
  * The two queues are used to store the data transmitted between Pi and Bot.
  */
 static my_queue_t queue_pi2esp;
@@ -278,7 +287,78 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
 }
 
+#ifdef EXEC_WRITE_ON
+#define PREPARE_BUF_MAX_SIZE 1024
+typedef struct {
+    uint8_t                 *prepare_buf;
+    int                     prepare_len;
+} prepare_type_env_t;
+static prepare_type_env_t prepare_write_env;
+
+void example_write_event_env(esp_gatt_if_t gatts_if, prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param){
+    esp_gatt_status_t status = ESP_GATT_OK;
+    if (param->write.need_rsp){
+        if (param->write.is_prep) {
+            if (param->write.offset > PREPARE_BUF_MAX_SIZE) {
+                status = ESP_GATT_INVALID_OFFSET;
+            } else if ((param->write.offset + param->write.len) > PREPARE_BUF_MAX_SIZE) {
+                status = ESP_GATT_INVALID_ATTR_LEN;
+            }
+            if (status == ESP_GATT_OK && prepare_write_env->prepare_buf == NULL) {
+                prepare_write_env->prepare_buf = (uint8_t *)malloc(PREPARE_BUF_MAX_SIZE*sizeof(uint8_t));
+                prepare_write_env->prepare_len = 0;
+                if (prepare_write_env->prepare_buf == NULL) {
+                    ESP_LOGE(GATTS_TAG, "Gatt_server prep no mem");
+                    status = ESP_GATT_NO_RESOURCES;
+                }
+            }
+
+            esp_gatt_rsp_t *gatt_rsp = (esp_gatt_rsp_t *)malloc(sizeof(esp_gatt_rsp_t));
+            if (gatt_rsp) {
+                gatt_rsp->attr_value.len = param->write.len;
+                gatt_rsp->attr_value.handle = param->write.handle;
+                gatt_rsp->attr_value.offset = param->write.offset;
+                gatt_rsp->attr_value.auth_req = ESP_GATT_AUTH_REQ_NONE;
+                memcpy(gatt_rsp->attr_value.value, param->write.value, param->write.len);
+                esp_err_t response_err = esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, status, gatt_rsp);
+                if (response_err != ESP_OK){
+                    ESP_LOGE(GATTS_TAG, "Send response error\n");
+                }
+                free(gatt_rsp);
+            } else {
+                ESP_LOGE(GATTS_TAG, "malloc failed, no resource to send response error\n");
+                status = ESP_GATT_NO_RESOURCES;
+            }
+            if (status != ESP_GATT_OK){
+                return;
+            }
+            memcpy(prepare_write_env->prepare_buf + param->write.offset,
+                   param->write.value,
+                   param->write.len);
+            prepare_write_env->prepare_len += param->write.len;
+
+        }else{
+            esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, status, NULL);
+        }
+    }
+}
+
+void example_exec_write_event_env(prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param){
+    if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC){
+        ESP_LOG_BUFFER_HEX(GATTS_TAG, prepare_write_env->prepare_buf, prepare_write_env->prepare_len);
+    }else{
+        ESP_LOGI(GATTS_TAG,"Prepare write cancel");
+    }
+    if (prepare_write_env->prepare_buf) {
+        free(prepare_write_env->prepare_buf);
+        prepare_write_env->prepare_buf = NULL;
+    }
+    prepare_write_env->prepare_len = 0;
+}
+#endif
+
 /**
+ * TODO:
  * README.
  */
 static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param) {
@@ -389,7 +469,9 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
     case ESP_GATTS_EXEC_WRITE_EVT:
         ESP_LOGI(GATTS_TAG,"Execute write");
         esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
-        // example_exec_write_event_env(&a_prepare_write_env, param);
+#ifdef EXEC_WRITE_ON
+        example_exec_write_event_env(&prepare_write_env, param);
+#endif
         break;
     case ESP_GATTS_MTU_EVT:
         ESP_LOGI(GATTS_TAG, "MTU exchange, MTU %d", param->mtu.mtu);
