@@ -16,6 +16,7 @@
 #include "esp_log.h"
 
 #include "constants.h"
+#include "utils.h"
 
 #define HW_UART_TAG "hw_uart module"
 
@@ -95,6 +96,7 @@ bool hw_uart_read(uint8_t data[MSG_LEN]) {
     }
 
     int result = uart_read_bytes(UART_PORT_NUM, data, len, pdMS_TO_TICKS(20));
+    replace_enter(data);
 
     /**
      * Clean text validation.

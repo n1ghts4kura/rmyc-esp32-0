@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 
 #include "constants.h"
+#include "utils.h"
 
 #define QUEUE_TAG "queue module"
 
@@ -68,6 +69,11 @@ bool is_queue_empty(my_queue_t *q) {
  * @return if append successfully
  */
 bool queue_append(my_queue_t *q, uint8_t val[MSG_LEN]) {
+    /**
+     * Replace all '\n' with ' ' for output beauty.
+     */
+    replace_enter(val);
+
     my_queue_node_t *new_node = (my_queue_node_t *)malloc(sizeof(my_queue_node_t));
     new_node->next = NULL;
     memcpy(new_node->val, val, MSG_LEN);
