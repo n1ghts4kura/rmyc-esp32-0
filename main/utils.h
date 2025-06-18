@@ -10,6 +10,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <string.h>
 #include <inttypes.h>
 
 void replace_enter(uint8_t *val) {

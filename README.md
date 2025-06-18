@@ -15,6 +15,8 @@
 - **Aunnno**
     - [传送门 Github](https://github.com/Aunnno)
 
+> 开发过程请查看 **dev-1** 分支
+
 ## 环境配置
 
 1. 安装**VS-Code**
