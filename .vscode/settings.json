@@ -5,18 +5,20 @@
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],
-  "idf.portWin": "COM5",
+  "idf.portWin": "COM3",
   "idf.toolsPathWin": "d:\\2025Project\\ESPIDF\\ESPIDF_TOOLS",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
   "idf.flashType": "UART",
   "files.associations": {
-    "sdkconfig.h": "c",
-    "reent.h": "c",
-    "uart.h": "c",
-    "constant.h": "c",
-    "stdlib.h": "c",
-    "esp_gatts_api.h": "c"
+    "freertos.h": "c",
+    "constants.h": "c",
+    "array": "c",
+    "deque": "c",
+    "list": "c",
+    "vector": "c",
+    "string_view": "c",
+    "span": "c"
   }
 }

@@ -2,15 +2,18 @@
  * constants.h
  * 
  * @author n1ghts4kura
- * @date 25/6/14
- * 
- * 基本定义
+ * @date 2025 q1->q2
+ *
+ * Some constants.
  */
 
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
 
-// 数据定义
-#define QUEUE_MSG_LENGTH 1536 // 1024 * 1.5
+/**
+ * This defines how long is a message.
+ * Unit: byte(?maybe)
+ */
+#define MSG_LEN 256 // 256 / 2 = 128(s) ascii characters.
 
 #endif
