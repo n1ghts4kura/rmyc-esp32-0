@@ -10,6 +10,7 @@
 #ifndef MY_QUEUE_H
 #define MY_QUEUE_H
 
+
 #include <stdlib.h>
 #include <inttypes.h>
 #include "freertos/task.h"
@@ -84,7 +85,7 @@ bool queue_append(my_queue_t *q, uint8_t val[MSG_LEN]) {
         q->rear->next = new_node;
         q->rear = new_node;
     }
-
+  
     return true;
 }
 

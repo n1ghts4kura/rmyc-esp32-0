@@ -5,7 +5,6 @@
  * @date 2025 q1->q2
  * 
  * This file defines basic usages of hardware UART.
- * 
  */
 
 #ifndef HW_UART_H
@@ -69,7 +68,7 @@ int hw_uart_write(char *data) {
     data[MSG_LEN - 1] = '\0';
     const int sent = uart_write_bytes(UART_PORT_NUM, data, strlen(data));
     ESP_LOGI(HW_UART_TAG, "Uart wrote [%s], ( %d / %d )", data, sent, MSG_LEN);
-
+  
     return sent;
 }
 

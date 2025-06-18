@@ -1,6 +1,10 @@
 /**
  * constants.h
  * 
+ * @author n1ghts4kura
+ * @date 2025 q1->q2
+ *
+ * Some constants.
  */
 
 #ifndef CONSTANTS_H
